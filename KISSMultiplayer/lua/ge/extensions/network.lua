@@ -97,7 +97,7 @@ local function handle_file_transfer(data)
   local file_len = bytesToU32(data:sub(1, 4))
   local file_name = data:sub(5, #data)
   local chunks = math.floor(file_len / FILE_TRANSFER_CHUNK_SIZE)
-  
+
   current_download = {
     file_len = file_len,
     file_name = file_name,
@@ -110,7 +110,11 @@ local function handle_file_transfer(data)
 end
 
 local function handle_player_info(player_info)
-  M.players[player_info.id] = player_info
+    M.players[player_info.id] = player_info
+    local saved_volume = kissui.voice_player_volumes[player_info.id]
+    if saved_volume ~= nil and kissvoicechat and kissvoicechat.set_player_volume then
+        kissvoicechat.set_player_volume(player_info.id, saved_volume)
+    end
 end
 
 local function check_lua(l)
@@ -125,9 +129,9 @@ local function check_lua(l)
 end
 
 local function handle_lua(data)
-  if M.is_server_public then 
+  if M.is_server_public then
       print("Blocked arbitrary Lua command from public server.")
-      return 
+      return
     end
 
   if check_lua(data) then
@@ -136,9 +140,9 @@ local function handle_lua(data)
 end
 
 local function handle_vehicle_lua(data)
-  if M.is_server_public then 
+  if M.is_server_public then
     print("Blocked arbitrary vehicle Lua command from public server.")
-    return 
+    return
   end
 
   local id = data[1]
@@ -169,6 +173,16 @@ local function handle_chat(data)
   kissui.chat.add_message(data[1], nil, data[2])
 end
 
+local function handle_bridge_voice_input_devices(devices)
+    if type(devices) ~= "table" then
+        return
+    end
+    kissui.voice_input_devices = devices
+    if kissui.voice_input_device == "" and #devices > 0 then
+        kissui.voice_input_device = tostring(devices[1])
+    end
+end
+
 local function onExtensionLoaded()
   message_handlers.VehicleUpdate = vehiclemanager.update_vehicle
   message_handlers.VehicleSpawn = vehiclemanager.spawn_vehicle
@@ -180,6 +194,7 @@ local function onExtensionLoaded()
   message_handlers.VehicleMetaUpdate = vehiclemanager.update_vehicle_meta
   message_handlers.Pong = handle_pong
   message_handlers.PlayerDisconnected = handle_player_disconnected
+  message_handlers.BridgeVoiceInputDevices = handle_bridge_voice_input_devices
   message_handlers.VehicleLuaCommand = handle_vehicle_lua
   message_handlers.CouplerAttached = vehiclemanager.attach_coupler
   message_handlers.CouplerDetached = vehiclemanager.detach_coupler
@@ -207,12 +222,12 @@ local function send_data(raw_data, reliable)
   if data_size > CHUNK_SIZE then
     print("Large data detected: " .. data_size .. " bytes, sending in chunks")
     local num_chunks = math.ceil(data_size / CHUNK_SIZE)
-    
+
     for i = 0, num_chunks - 1 do
       local start_pos = i * CHUNK_SIZE + 1
       local end_pos = math.min((i + 1) * CHUNK_SIZE, data_size)
       local chunk = data:sub(start_pos, end_pos)
-      
+
       local chunk_data = jsonEncode({
         DataChunk = {
           chunk_index = i,
@@ -224,14 +239,14 @@ local function send_data(raw_data, reliable)
       local len = ffi.string(ffi.new("uint32_t[?]", 1, {#chunk_data}), 4)
       M.connection.tcp:send(string.char(1)..len)
       M.connection.tcp:send(chunk_data)
-      
+
       print("Sent chunk " .. (i + 1) .. "/" .. num_chunks)
     end
-    
+
     print("All chunks sent successfully")
     return 0
   end
-  
+
   -- Send normally
   local len = ffi.string(ffi.new("uint32_t[?]", 1, {data_size}), 4)
   if reliable then
@@ -250,7 +265,7 @@ local function sanitize_addr(addr)
 
   -- Check if port is missing, add default port if so
   if not sanitized:find(":") then
-    sanitized = sanitized .. ":3698" 
+    sanitized = sanitized .. ":3698"
   end
   return sanitized
 end
@@ -338,6 +353,10 @@ local function connect(addr, player_name, is_public)
   }
   send_data(client_info, true)
 
+  if kissvoicechat and kissvoicechat.apply_settings then
+      kissvoicechat.apply_settings()
+  end
+
   kissmods.set_mods_list(server_info.mods)
   kissmods.update_status_all()
 
@@ -351,7 +370,7 @@ local function connect(addr, player_name, is_public)
     end
   end
   M.connection.mods_left = #missing_mods
- 
+
   kissmods.deactivate_all_mods()
   for k, v in pairs(missing_mods) do
     print(k.." "..v)
