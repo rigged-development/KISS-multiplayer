@@ -4,10 +4,12 @@ M.VERSION_STR = "0.7.0"
 M.is_server_public = false
 
 M.downloads = {}
+M.downloads_meta = {}
 M.downloading = false
 M.downloads_status = {}
 
 local current_download = nil
+local on_finished_download
 
 local socket = require("socket")
 local messagepack = require("lua/common/libs/Lua-MessagePack/MessagePack")
@@ -28,8 +30,14 @@ M.connection = {
   time_offset = 0
 }
 
-local FILE_TRANSFER_CHUNK_SIZE = 16384;
+local FILE_TRANSFER_CHUNK_SIZE = 65536;
 local CHUNK_SIZE = 65000  -- Safe size under 65536 limit
+local MAX_BINARY_CHUNKS_PER_UPDATE = 48
+local MAX_BINARY_BYTES_PER_UPDATE = 2 * 1024 * 1024
+local BINARY_FRAME_TIME_BUDGET_MIN = 0.002
+local BINARY_FRAME_TIME_BUDGET_MAX = 0.006
+local BINARY_FRAME_TIME_BUDGET_RATIO = 0.25
+local DOWNLOAD_SPEED_SAMPLE_MIN = 0.2
 
 local message_handlers = {}
 
@@ -169,6 +177,102 @@ local function handle_player_disconnected(data)
   M.players[id] = nil
 end
 
+local function handle_bridge_mod_downloaded(name)
+    if not name then
+        return
+    end
+
+    kissmods.mount_mod(name)
+    local status = M.downloads_status[name]
+    if not status then
+        status = {
+            name = name,
+            progress = 1,
+            received_bytes = 0,
+            speed_bps = 0,
+            completed = true,
+        }
+        M.downloads_status[name] = status
+    end
+
+    status.progress = 1
+    status.speed_bps = 0
+    status.completed = true
+
+    M.connection.mods_left = math.max((M.connection.mods_left or 0) - 1, 0)
+
+    if M.connection.mods_left <= 0 then
+        M.downloading = false
+        kissui.show_download = false
+        on_finished_download()
+    end
+end
+
+local function update_download_speed(status, received_bytes)
+    if not status then
+        return
+    end
+
+    local now = socket.gettime()
+    local received = math.max(received_bytes or 0, 0)
+
+    status.received_bytes = received
+    status.speed_bps = status.speed_bps or 0
+
+    if not status.last_speed_ts then
+        status.last_speed_ts = now
+        status.last_speed_bytes = received
+        return
+    end
+
+    local dt = now - status.last_speed_ts
+    if dt <= 0 then
+        return
+    end
+
+    local delta = received - (status.last_speed_bytes or 0)
+    if delta < 0 then
+        status.last_speed_ts = now
+        status.last_speed_bytes = received
+        return
+    end
+
+    if dt >= DOWNLOAD_SPEED_SAMPLE_MIN then
+        local instant_bps = delta / dt
+        status.speed_bps = (status.speed_bps * 0.65) + (instant_bps * 0.35)
+        status.last_speed_ts = now
+        status.last_speed_bytes = received
+    end
+end
+
+local function handle_bridge_mod_download_progress(data)
+    if not data or not data.name then
+        return
+    end
+
+    local status = M.downloads_status[data.name]
+    if not status then
+        status = {
+            name = data.name,
+            progress = 0,
+            received_bytes = 0,
+            speed_bps = 0,
+            completed = false,
+        }
+        M.downloads_status[data.name] = status
+    end
+
+    status.progress = math.min(math.max(data.progress or 0, 0), 1)
+    status.completed = false
+    local mod = kissmods.mods[data.name]
+    if mod and mod.size then
+        update_download_speed(status, mod.size * status.progress)
+    end
+
+    M.downloading = true
+    kissui.show_download = true
+end
+
 local function handle_chat(data)
   kissui.chat.add_message(data[1], nil, data[2])
 end
@@ -184,25 +288,27 @@ local function handle_bridge_voice_input_devices(devices)
 end
 
 local function onExtensionLoaded()
-  message_handlers.VehicleUpdate = vehiclemanager.update_vehicle
-  message_handlers.VehicleSpawn = vehiclemanager.spawn_vehicle
-  message_handlers.RemoveVehicle = vehiclemanager.remove_vehicle
-  message_handlers.ResetVehicle = vehiclemanager.reset_vehicle
-  message_handlers.Chat = handle_chat
-  message_handlers.SendLua = handle_lua
-  message_handlers.PlayerInfoUpdate = handle_player_info
-  message_handlers.VehicleMetaUpdate = vehiclemanager.update_vehicle_meta
-  message_handlers.Pong = handle_pong
-  message_handlers.PlayerDisconnected = handle_player_disconnected
-  message_handlers.BridgeVoiceInputDevices = handle_bridge_voice_input_devices
-  message_handlers.VehicleLuaCommand = handle_vehicle_lua
-  message_handlers.CouplerAttached = vehiclemanager.attach_coupler
-  message_handlers.CouplerDetached = vehiclemanager.detach_coupler
-  message_handlers.ElectricsUndefinedUpdate = vehiclemanager.electrics_diff_update
+    message_handlers.VehicleUpdate = vehiclemanager.update_vehicle
+    message_handlers.VehicleSpawn = vehiclemanager.spawn_vehicle
+    message_handlers.RemoveVehicle = vehiclemanager.remove_vehicle
+    message_handlers.ResetVehicle = vehiclemanager.reset_vehicle
+    message_handlers.Chat = handle_chat
+    message_handlers.SendLua = handle_lua
+    message_handlers.PlayerInfoUpdate = handle_player_info
+    message_handlers.VehicleMetaUpdate = vehiclemanager.update_vehicle_meta
+    message_handlers.Pong = handle_pong
+    message_handlers.PlayerDisconnected = handle_player_disconnected
+    message_handlers.BridgeVoiceInputDevices = handle_bridge_voice_input_devices
+    message_handlers.BridgeModDownloaded = handle_bridge_mod_downloaded
+    message_handlers.BridgeModDownloadProgress = handle_bridge_mod_download_progress
+    message_handlers.VehicleLuaCommand = handle_vehicle_lua
+    message_handlers.CouplerAttached = vehiclemanager.attach_coupler
+    message_handlers.CouplerDetached = vehiclemanager.detach_coupler
+    message_handlers.ElectricsUndefinedUpdate = vehiclemanager.electrics_diff_update
 
-  message_handlers.VehicleSetPosition = vehiclemanager.set_position
-  message_handlers.VehicleSetPositionRotation = vehiclemanager.set_position_rotation
-  message_handlers.VehicleResetInPlace = vehiclemanager.reset_in_place
+    message_handlers.VehicleSetPosition = vehiclemanager.set_position
+    message_handlers.VehicleSetPositionRotation = vehiclemanager.set_position_rotation
+    message_handlers.VehicleResetInPlace = vehiclemanager.reset_in_place
 end
 
 local function send_data(raw_data, reliable)
@@ -275,6 +381,26 @@ local function generate_secret(server_identifier)
   return hashStringSHA1(secret)
 end
 
+local function get_bridge_mods_dir()
+    local base = nil
+
+    if type(getUserPath) == "function" then
+        base = getUserPath()
+    end
+
+    if (not base or base == "") and FS and type(FS.getUserPath) == "function" then
+        base = FS:getUserPath()
+    end
+
+    if not base or base == "" then
+        return ""
+    end
+
+    base = tostring(base)
+    base = base:gsub("[/\\]+$", "")
+    return base .. "/kissmp_mods"
+end
+
 local function change_map(map)
   if FS:fileExists(map) or FS:directoryExists(map) then
     vehiclemanager.loading_map = true
@@ -305,16 +431,24 @@ local function connect(addr, player_name, is_public)
   M.connection.tcp:send(addr_lenght)
   M.connection.tcp:send(addr)
 
-  local connection_confirmed = M.connection.tcp:receive(1)
-  if connection_confirmed then
-    if connection_confirmed ~= string.char(1) then
-      kissui.chat.add_message("Connection failed.", kissui.COLOR_RED)
-      return
+    -- Provide bridge with the real mods directory from the current Lua environment.
+    local mods_dir = get_bridge_mods_dir()
+    local mods_dir_length = ffi.string(ffi.new("uint32_t[?]", 1, { #mods_dir }), 4)
+    M.connection.tcp:send(mods_dir_length)
+    if #mods_dir > 0 then
+        M.connection.tcp:send(mods_dir)
     end
-  else
-    kissui.chat.add_message("Failed to confirm connection. Check if bridge is running.", kissui.COLOR_RED)
-    return
-  end
+
+    local connection_confirmed = M.connection.tcp:receive(1)
+    if connection_confirmed then
+        if connection_confirmed ~= string.char(1) then
+            kissui.chat.add_message("Connection failed.", kissui.COLOR_RED)
+            return
+        end
+    else
+        kissui.chat.add_message("Failed to confirm connection. Check if bridge is running.", kissui.COLOR_RED)
+        return
+    end
 
     -- Ignore message type
   M.connection.tcp:receive(1)
@@ -398,6 +532,8 @@ local function connect(addr, player_name, is_public)
       disconnect()
       return
     else
+        M.downloading = true
+        kissui.show_download = true
       -- Request mods when using direct IP
       send_data(
         {
@@ -441,13 +577,16 @@ local function send_ping()
 end
 
 local function cancel_download()
-  --[[if not current_download then return end
-  io.close(current_download.file)
-  current_download = nil
-    M.downloading = false]]--
-  for k, v in pairs(M.downloads) do
-     M.downloads[k]:close()
-  end
+    --[[if not current_download then return end
+    io.close(current_download.file)
+    current_download = nil
+      M.downloading = false]]--
+    for k, v in pairs(M.downloads) do
+        M.downloads[k]:close()
+    end
+  M.downloads = {}
+  M.downloads_meta = {}
+  M.downloads_status = {}
 end
 
 local function onUpdate(dt)
@@ -459,73 +598,122 @@ local function onUpdate(dt)
     send_ping()
   end
 
-  while true do
-    local msg_type = M.connection.tcp:receive(1)
-    if not msg_type then break end
-    --print("msg_t"..string.byte(msg_type))
-    M.connection.tcp:settimeout(5.0)
-    -- JSON data
-    if string.byte(msg_type) == 1 then
-      local data = M.connection.tcp:receive(4)
-      local len = bytesToU32(data)
-      local data, _, _ = M.connection.tcp:receive(len)
-      M.connection.tcp:settimeout(0.0)
-      local data_decoded = jsonDecode(data)
-      for k, v in pairs(data_decoded) do
-        if message_handlers[k] then
-          message_handlers[k](v)
-        end
-      end
-    elseif string.byte(msg_type) == 0 then -- Binary data
-      M.downloading = true
-      kissui.show_download = true
-      local name_b = M.connection.tcp:receive(4)
-      local len_n = bytesToU32(name_b)
-      local name, _, _ = M.connection.tcp:receive(len_n)
-      local chunk_n_b = M.connection.tcp:receive(4)
-      local chunk_a_b = M.connection.tcp:receive(4)
-      local read_size_b = M.connection.tcp:receive(4)
-      local chunk_n = bytesToU32(chunk_n_b)
-      local chunk_a = bytesToU32(chunk_a_b)
-      local read_size = bytesToU32(read_size_b)
-      local file_length = chunk_a
-      local file_data, _, _ = M.connection.tcp:receive(read_size)
-      M.downloads_status[name] = {
-        name = name,
-        progress = 0
-      }
-      M.downloads_status[name].progress = chunk_n * FILE_TRANSFER_CHUNK_SIZE / file_length
-      local file = M.downloads[name]
-      if not file then
-        M.downloads[name] = kissmods.open_file(name)
-      end
-      M.downloads[name]:write(file_data)
-      if read_size < FILE_TRANSFER_CHUNK_SIZE then
-        M.downloading = false
-        kissui.show_download = false
-        kissmods.mount_mod(name)
-        M.downloads[name]:close()
-        M.downloads[name] = nil
-        M.downloads_status = {}
-        M.connection.mods_left = M.connection.mods_left - 1
-      end
-      if M.connection.mods_left <= 0 then
-        on_finished_download()
-      end
-      M.connection.tcp:settimeout(0.0)
-      break
-    elseif string.byte(msg_type) == 2 then
-      local len_b = M.connection.tcp:receive(4)
-      local len = bytesToU32(len_b)
-      local reason, _, _ = M.connection.tcp:receive(len)
-      disconnect(reason)
+  local update_start = socket.gettime()
+  local frame_time_budget = math.max(BINARY_FRAME_TIME_BUDGET_MIN, dt * BINARY_FRAME_TIME_BUDGET_RATIO)
+  frame_time_budget = math.min(frame_time_budget, BINARY_FRAME_TIME_BUDGET_MAX)
+  local binary_chunks_processed = 0
+  local binary_bytes_processed = 0
+    while true do
+    if binary_chunks_processed > 0 then
+      if binary_chunks_processed >= MAX_BINARY_CHUNKS_PER_UPDATE then break end
+      if binary_bytes_processed >= MAX_BINARY_BYTES_PER_UPDATE then break end
+      if (socket.gettime() - update_start) >= frame_time_budget then break end
     end
-  end
+
+        local msg_type = M.connection.tcp:receive(1)
+        if not msg_type then
+            break
+        end
+        --print("msg_t"..string.byte(msg_type))
+        M.connection.tcp:settimeout(5.0)
+        -- JSON data
+        if string.byte(msg_type) == 1 then
+            local data = M.connection.tcp:receive(4)
+            local len = bytesToU32(data)
+            local data, _, _ = M.connection.tcp:receive(len)
+            M.connection.tcp:settimeout(0.0)
+            local data_decoded = jsonDecode(data)
+            for k, v in pairs(data_decoded) do
+                if message_handlers[k] then
+                    message_handlers[k](v)
+                end
+            end
+        elseif string.byte(msg_type) == 0 then
+            -- Binary data
+            M.downloading = true
+            kissui.show_download = true
+            local name_b = M.connection.tcp:receive(4)
+            local len_n = bytesToU32(name_b)
+            local name, _, _ = M.connection.tcp:receive(len_n)
+            local chunk_n_b = M.connection.tcp:receive(4)
+            local chunk_a_b = M.connection.tcp:receive(4)
+            local read_size_b = M.connection.tcp:receive(4)
+            local chunk_n = bytesToU32(chunk_n_b)
+            local chunk_a = bytesToU32(chunk_a_b)
+            local read_size = bytesToU32(read_size_b)
+            local file_length = chunk_a
+            local file_data, _, _ = M.connection.tcp:receive(read_size)
+
+      local meta = M.downloads_meta[name]
+      if not meta then
+        meta = {
+          file_length = file_length,
+          received = 0,
+        }
+        M.downloads_meta[name] = meta
+      end
+
+      local status = M.downloads_status[name]
+      if not status then
+        status = {
+          name = name,
+          progress = 0,
+          received_bytes = 0,
+          speed_bps = 0,
+          completed = false,
+        }
+        M.downloads_status[name] = status
+      end
+
+            local file = M.downloads[name]
+            if not file then
+                M.downloads[name] = kissmods.open_file(name)
+            end
+            M.downloads[name]:write(file_data)
+      meta.received = meta.received + read_size
+      status.progress = math.min(meta.received / math.max(file_length, 1), 1)
+      status.completed = false
+      update_download_speed(status, meta.received)
+
+      binary_chunks_processed = binary_chunks_processed + 1
+      binary_bytes_processed = binary_bytes_processed + read_size
+
+      if meta.received >= file_length then
+                kissmods.mount_mod(name)
+                M.downloads[name]:close()
+                M.downloads[name] = nil
+        M.downloads_meta[name] = nil
+        status.progress = 1
+        status.speed_bps = 0
+        status.completed = true
+                M.connection.mods_left = math.max((M.connection.mods_left or 0) - 1, 0)
+        if M.connection.mods_left == 0 then
+          M.downloading = false
+          kissui.show_download = false
+          on_finished_download()
+        end
+            end
+            M.connection.tcp:settimeout(0.0)
+        elseif string.byte(msg_type) == 2 then
+            local len_b = M.connection.tcp:receive(4)
+            local len = bytesToU32(len_b)
+            local reason, _, _ = M.connection.tcp:receive(len)
+            disconnect(reason)
+        end
+    end
 end
 
 local function get_client_id()
   return M.connection.client_id
 end
+
+local function onLoadingScreenFadeout()
+  if M.connection.connected then
+    core_gamestate.setGameState('kissmp', 'freeroam', 'freeroam')
+  end
+end
+
+M.onLoadingScreenFadeout = onLoadingScreenFadeout
 
 M.get_client_id = get_client_id
 M.connect = connect
