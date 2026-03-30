@@ -20,8 +20,10 @@ use anyhow::{Context, Error};
 use futures::FutureExt;
 use futures::{select, StreamExt, TryStreamExt};
 use log::{error, info, warn, debug};
+use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
@@ -605,7 +607,7 @@ async fn send(stream: &mut quinn::SendStream, message: &[u8]) -> anyhow::Result<
 
 pub fn list_mods(
     mods: Option<Vec<String>>,
-) -> anyhow::Result<(Vec<(String, u32)>, Vec<std::path::PathBuf>)> {
+) -> anyhow::Result<(Vec<(String, u32, String)>, Vec<std::path::PathBuf>)> {
     let mut paths = vec![];
 
     if let Some(mods) = mods {
@@ -683,7 +685,19 @@ pub fn list_mods(
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         let file = std::fs::File::open(path.clone())?;
         let metadata = file.metadata()?;
-        result.push((file_name, metadata.len() as u32));
+        let mut file_for_hash = std::fs::File::open(path.clone())?;
+        let mut hasher = Sha1::new();
+        let mut hash_buf = [0u8; 64 * 1024];
+        loop {
+            let read_bytes = file_for_hash.read(&mut hash_buf)?;
+            if read_bytes == 0 {
+                break;
+            }
+            hasher.update(&hash_buf[..read_bytes]);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+
+        result.push((file_name, metadata.len() as u32, hash));
         raw.push(path);
     }
     Ok((result, raw))

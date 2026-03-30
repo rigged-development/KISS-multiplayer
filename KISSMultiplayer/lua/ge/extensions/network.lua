@@ -329,8 +329,24 @@ local function connect(addr, player_name)
   for _, mod in pairs(kissmods.mods) do
     table.insert(mod_names, mod.name)
     if mod.status ~= "ok" then
+      print(string.format(
+        "[KISSMP][MOD-CHECK] request=%s status=%s reason=%s server_hash=%s local_hash=%s size=%s",
+        tostring(mod.name),
+        tostring(mod.status),
+        tostring(mod.debug_reason or "unknown"),
+        tostring(mod.hash or ""),
+        tostring(mod.local_hash or ""),
+        tostring(mod.size or 0)
+      ))
       table.insert(missing_mods, mod.name)
       M.downloads_status[mod.name] = {name = mod.name, progress = 0}
+    else
+      print(string.format(
+        "[KISSMP][MOD-CHECK] keep=%s status=ok reason=%s hash=%s",
+        tostring(mod.name),
+        tostring(mod.debug_reason or "ok"),
+        tostring(mod.hash or "")
+      ))
     end
   end
   M.connection.mods_left = #missing_mods
