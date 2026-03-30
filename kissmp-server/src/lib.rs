@@ -67,6 +67,7 @@ impl Connection {
 
 pub struct Server {
     connections: HashMap<u32, Connection>,
+    voice_frequencies: HashMap<u32, u16>,
     vehicles: HashMap<u32, Vehicle>,
     // Client ID, game_id, server_id
     vehicle_ids: HashMap<u32, HashMap<u32, u32>>,
@@ -136,6 +137,7 @@ impl Server {
         let mod_transfer_chunk_size = (config.mod_transfer_chunk_size_kib.clamp(512, 1024) as usize) * 1024;
         Self {
             connections: HashMap::with_capacity(8),
+            voice_frequencies: HashMap::with_capacity(8),
             reqwest_client: reqwest::Client::new(),
             vehicles: HashMap::with_capacity(64),
             vehicle_ids: HashMap::with_capacity(64),
