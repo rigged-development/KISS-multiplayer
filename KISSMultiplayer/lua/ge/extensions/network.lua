@@ -9,7 +9,6 @@ M.downloads_status = {}
 
 local current_download = nil
 local on_finished_download
-local disable_marker_interaction
 
 local socket = require("socket")
 local messagepack = require("lua/common/libs/Lua-MessagePack/MessagePack")
@@ -203,7 +202,6 @@ local function handle_chat(data)
 end
 
 local function onExtensionLoaded()
-  disable_marker_interaction()
   message_handlers.VehicleUpdate = vehiclemanager.update_vehicle
   message_handlers.VehicleSpawn = vehiclemanager.spawn_vehicle
   message_handlers.RemoveVehicle = vehiclemanager.remove_vehicle
@@ -292,43 +290,6 @@ local function generate_secret(server_identifier)
   return hashStringSHA1(secret)
 end
 
-disable_marker_interaction = function()
-  if not DISABLE_MARKER_INTERACTION_WORKAROUND and not DISABLE_MINIMAP_KDTREE_WORKAROUND then
-    return
-  end
-  if not extensions then return end
-
-  local candidates = {}
-  if DISABLE_MARKER_INTERACTION_WORKAROUND then
-    table.insert(candidates, "gameplay_markerInteraction")
-    table.insert(candidates, "gameplay/markerInteraction")
-  end
-
-  if DISABLE_MINIMAP_KDTREE_WORKAROUND then
-    table.insert(candidates, "ui_apps_minimap")
-    table.insert(candidates, "ui/apps/minimap/minimap")
-    table.insert(candidates, "ui_apps_minimap_minimap")
-  end
-
-  for _, ext_name in pairs(candidates) do
-    if type(extensions.unload) == "function" then
-      pcall(function() extensions.unload(ext_name) end)
-      pcall(function() extensions:unload(ext_name) end)
-    end
-    if type(extensions.unloadExtension) == "function" then
-      pcall(function() extensions.unloadExtension(ext_name) end)
-      pcall(function() extensions:unloadExtension(ext_name) end)
-    end
-  end
-
-  if DISABLE_MINIMAP_KDTREE_WORKAROUND and not minimap_workaround_notified then
-    minimap_workaround_notified = true
-    pcall(function()
-      kissui.chat.add_message("Minimap was disabled in multiplayer to avoid a map marker crash.")
-    end)
-  end
-end
-
 local function get_bridge_mods_dir()
   local base = nil
 
@@ -350,7 +311,6 @@ local function get_bridge_mods_dir()
 end
 
 local function change_map(map)
-  disable_marker_interaction()
   if FS:fileExists(map) or FS:directoryExists(map) then
     vehiclemanager.loading_map = true
     freeroam_freeroam.startFreeroam(map)
@@ -361,8 +321,6 @@ local function change_map(map)
 end
 
 local function onMissionLoaded()
-  -- MarkerInteraction can be loaded again by map/game systems; disable it once more.
-  disable_marker_interaction()
 end
 
 local function connect(addr, player_name)
@@ -536,7 +494,6 @@ local function onUpdate(dt)
   marker_interaction_recheck_timer = marker_interaction_recheck_timer + dt
   if marker_interaction_recheck_timer >= MARKER_INTERACTION_RECHECK_INTERVAL then
     marker_interaction_recheck_timer = 0
-    disable_marker_interaction()
   end
 
   if M.connection.timer < M.connection.heartbeat_time then
@@ -644,6 +601,14 @@ end
 local function get_client_id()
   return M.connection.client_id
 end
+
+local function onLoadingScreenFadeout()
+  if M.connection.connected then
+    core_gamestate.setGameState('kissmp', 'freeroam', 'freeroam')
+  end
+end
+
+M.onLoadingScreenFadeout = onLoadingScreenFadeout
 
 M.get_client_id = get_client_id
 M.connect = connect
