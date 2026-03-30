@@ -3,10 +3,13 @@ local M = {}
 M.VERSION_STR = "0.7.0"
 
 M.downloads = {}
+M.downloads_meta = {}
 M.downloading = false
 M.downloads_status = {}
 
 local current_download = nil
+local on_finished_download
+local disable_marker_interaction
 
 local socket = require("socket")
 local messagepack = require("lua/common/libs/Lua-MessagePack/MessagePack")
@@ -27,8 +30,18 @@ M.connection = {
   time_offset = 0
 }
 
-local FILE_TRANSFER_CHUNK_SIZE = 16384;
+local FILE_TRANSFER_CHUNK_SIZE = 65536;
 local CHUNK_SIZE = 65000  -- Safe size under 65536 limit
+local MAX_BINARY_CHUNKS_PER_UPDATE = 48
+local MAX_BINARY_BYTES_PER_UPDATE = 2 * 1024 * 1024
+local BINARY_FRAME_TIME_BUDGET_MIN = 0.002
+local BINARY_FRAME_TIME_BUDGET_MAX = 0.006
+local BINARY_FRAME_TIME_BUDGET_RATIO = 0.25
+local DISABLE_MARKER_INTERACTION_WORKAROUND = true
+local DISABLE_MINIMAP_KDTREE_WORKAROUND = true
+local MARKER_INTERACTION_RECHECK_INTERVAL = 1.0
+local marker_interaction_recheck_timer = 0
+local minimap_workaround_notified = false
 
 local message_handlers = {}
 
@@ -154,11 +167,43 @@ local function handle_player_disconnected(data)
   M.players[id] = nil
 end
 
+local function handle_bridge_mod_downloaded(name)
+  if not name then return end
+
+  kissmods.mount_mod(name)
+  M.downloads_status[name] = nil
+  M.connection.mods_left = M.connection.mods_left - 1
+
+  if M.connection.mods_left <= 0 then
+    M.downloading = false
+    kissui.show_download = false
+    on_finished_download()
+  end
+end
+
+local function handle_bridge_mod_download_progress(data)
+  if not data or not data.name then return end
+
+  local status = M.downloads_status[data.name]
+  if not status then
+    status = {
+      name = data.name,
+      progress = 0,
+    }
+    M.downloads_status[data.name] = status
+  end
+
+  status.progress = math.min(math.max(data.progress or 0, 0), 1)
+  M.downloading = true
+  kissui.show_download = true
+end
+
 local function handle_chat(data)
   kissui.chat.add_message(data[1], nil, data[2])
 end
 
 local function onExtensionLoaded()
+  disable_marker_interaction()
   message_handlers.VehicleUpdate = vehiclemanager.update_vehicle
   message_handlers.VehicleSpawn = vehiclemanager.spawn_vehicle
   message_handlers.RemoveVehicle = vehiclemanager.remove_vehicle
@@ -169,6 +214,8 @@ local function onExtensionLoaded()
   message_handlers.VehicleMetaUpdate = vehiclemanager.update_vehicle_meta
   message_handlers.Pong = handle_pong
   message_handlers.PlayerDisconnected = handle_player_disconnected
+  message_handlers.BridgeModDownloaded = handle_bridge_mod_downloaded
+  message_handlers.BridgeModDownloadProgress = handle_bridge_mod_download_progress
   message_handlers.VehicleLuaCommand = handle_vehicle_lua
   message_handlers.CouplerAttached = vehiclemanager.attach_coupler
   message_handlers.CouplerDetached = vehiclemanager.detach_coupler
@@ -245,7 +292,65 @@ local function generate_secret(server_identifier)
   return hashStringSHA1(secret)
 end
 
+disable_marker_interaction = function()
+  if not DISABLE_MARKER_INTERACTION_WORKAROUND and not DISABLE_MINIMAP_KDTREE_WORKAROUND then
+    return
+  end
+  if not extensions then return end
+
+  local candidates = {}
+  if DISABLE_MARKER_INTERACTION_WORKAROUND then
+    table.insert(candidates, "gameplay_markerInteraction")
+    table.insert(candidates, "gameplay/markerInteraction")
+  end
+
+  if DISABLE_MINIMAP_KDTREE_WORKAROUND then
+    table.insert(candidates, "ui_apps_minimap")
+    table.insert(candidates, "ui/apps/minimap/minimap")
+    table.insert(candidates, "ui_apps_minimap_minimap")
+  end
+
+  for _, ext_name in pairs(candidates) do
+    if type(extensions.unload) == "function" then
+      pcall(function() extensions.unload(ext_name) end)
+      pcall(function() extensions:unload(ext_name) end)
+    end
+    if type(extensions.unloadExtension) == "function" then
+      pcall(function() extensions.unloadExtension(ext_name) end)
+      pcall(function() extensions:unloadExtension(ext_name) end)
+    end
+  end
+
+  if DISABLE_MINIMAP_KDTREE_WORKAROUND and not minimap_workaround_notified then
+    minimap_workaround_notified = true
+    pcall(function()
+      kissui.chat.add_message("Minimap was disabled in multiplayer to avoid a map marker crash.")
+    end)
+  end
+end
+
+local function get_bridge_mods_dir()
+  local base = nil
+
+  if type(getUserPath) == "function" then
+    base = getUserPath()
+  end
+
+  if (not base or base == "") and FS and type(FS.getUserPath) == "function" then
+    base = FS:getUserPath()
+  end
+
+  if not base or base == "" then
+    return ""
+  end
+
+  base = tostring(base)
+  base = base:gsub("[/\\]+$", "")
+  return base .. "/kissmp_mods"
+end
+
 local function change_map(map)
+  disable_marker_interaction()
   if FS:fileExists(map) or FS:directoryExists(map) then
     vehiclemanager.loading_map = true
     freeroam_freeroam.startFreeroam(map)
@@ -253,6 +358,11 @@ local function change_map(map)
     kissui.chat.add_message("Map file doesn't exist. Check if mod containing map is enabled", kissui.COLOR_RED)
     disconnect()
   end
+end
+
+local function onMissionLoaded()
+  -- MarkerInteraction can be loaded again by map/game systems; disable it once more.
+  disable_marker_interaction()
 end
 
 local function connect(addr, player_name)
@@ -272,6 +382,14 @@ local function connect(addr, player_name)
   local addr_lenght = ffi.string(ffi.new("uint32_t[?]", 1, {#addr}), 4)
   M.connection.tcp:send(addr_lenght)
   M.connection.tcp:send(addr)
+
+  -- Provide bridge with the real mods directory from the current Lua environment.
+  local mods_dir = get_bridge_mods_dir()
+  local mods_dir_length = ffi.string(ffi.new("uint32_t[?]", 1, {#mods_dir}), 4)
+  M.connection.tcp:send(mods_dir_length)
+  if #mods_dir > 0 then
+    M.connection.tcp:send(mods_dir)
+  end
 
   local connection_confirmed = M.connection.tcp:receive(1)
   if connection_confirmed then
@@ -340,6 +458,8 @@ local function connect(addr, player_name)
     print(k.." "..v)
   end
   if #missing_mods > 0 then
+    M.downloading = true
+    kissui.show_download = true
     -- Request mods
     send_data(
       {
@@ -366,7 +486,7 @@ local function send_messagepack(data_type, reliable, data)
   send_data(data_type, reliable, data)
 end
 
-local function on_finished_download()
+on_finished_download = function()
   vehiclemanager.loading_map = true
   change_map(M.connection.server_info.map)
 end
@@ -389,10 +509,20 @@ local function cancel_download()
   for k, v in pairs(M.downloads) do
      M.downloads[k]:close()
   end
+  M.downloads = {}
+  M.downloads_meta = {}
+  M.downloads_status = {}
 end
 
 local function onUpdate(dt)
   if not M.connection.connected then return end
+
+  marker_interaction_recheck_timer = marker_interaction_recheck_timer + dt
+  if marker_interaction_recheck_timer >= MARKER_INTERACTION_RECHECK_INTERVAL then
+    marker_interaction_recheck_timer = 0
+    disable_marker_interaction()
+  end
+
   if M.connection.timer < M.connection.heartbeat_time then
     M.connection.timer = M.connection.timer + dt
   else
@@ -400,7 +530,18 @@ local function onUpdate(dt)
     send_ping()
   end
 
+  local update_start = socket.gettime()
+  local frame_time_budget = math.max(BINARY_FRAME_TIME_BUDGET_MIN, dt * BINARY_FRAME_TIME_BUDGET_RATIO)
+  frame_time_budget = math.min(frame_time_budget, BINARY_FRAME_TIME_BUDGET_MAX)
+  local binary_chunks_processed = 0
+  local binary_bytes_processed = 0
   while true do
+    if binary_chunks_processed > 0 then
+      if binary_chunks_processed >= MAX_BINARY_CHUNKS_PER_UPDATE then break end
+      if binary_bytes_processed >= MAX_BINARY_BYTES_PER_UPDATE then break end
+      if (socket.gettime() - update_start) >= frame_time_budget then break end
+    end
+
     local msg_type = M.connection.tcp:receive(1)
     if not msg_type then break end
     --print("msg_t"..string.byte(msg_type))
@@ -431,30 +572,50 @@ local function onUpdate(dt)
       local read_size = bytesToU32(read_size_b)
       local file_length = chunk_a
       local file_data, _, _ = M.connection.tcp:receive(read_size)
-      M.downloads_status[name] = {
-        name = name,
-        progress = 0
-      }
-      M.downloads_status[name].progress = chunk_n * FILE_TRANSFER_CHUNK_SIZE / file_length
+
+      local meta = M.downloads_meta[name]
+      if not meta then
+        meta = {
+          file_length = file_length,
+          received = 0,
+        }
+        M.downloads_meta[name] = meta
+      end
+
+      local status = M.downloads_status[name]
+      if not status then
+        status = {
+          name = name,
+          progress = 0,
+        }
+        M.downloads_status[name] = status
+      end
+
       local file = M.downloads[name]
       if not file then
         M.downloads[name] = kissmods.open_file(name)
       end
       M.downloads[name]:write(file_data)
-      if read_size < FILE_TRANSFER_CHUNK_SIZE then
+      meta.received = meta.received + read_size
+      status.progress = math.min(meta.received / math.max(file_length, 1), 1)
+
+      binary_chunks_processed = binary_chunks_processed + 1
+      binary_bytes_processed = binary_bytes_processed + read_size
+
+      if meta.received >= file_length then
         M.downloading = false
         kissui.show_download = false
         kissmods.mount_mod(name)
         M.downloads[name]:close()
         M.downloads[name] = nil
-        M.downloads_status = {}
+        M.downloads_meta[name] = nil
+        M.downloads_status[name] = nil
         M.connection.mods_left = M.connection.mods_left - 1
-      end
-      if M.connection.mods_left <= 0 then
-        on_finished_download()
+        if M.connection.mods_left == 0 then
+          on_finished_download()
+        end
       end
       M.connection.tcp:settimeout(0.0)
-      break
     elseif string.byte(msg_type) == 2 then
       local len_b = M.connection.tcp:receive(4)
       local len = bytesToU32(len_b)
@@ -476,5 +637,6 @@ M.send_data = send_data
 M.onUpdate = onUpdate
 M.send_messagepack = send_messagepack
 M.onExtensionLoaded = onExtensionLoaded
+M.onMissionLoaded = onMissionLoaded
 
 return M

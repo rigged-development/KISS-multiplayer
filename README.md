@@ -44,6 +44,28 @@ After, clone the repository
 git clone https://github.com/TheHellBox/KISS-multiplayer.git
 cd KISS-multiplayer
 ```
+
+### One-click (Windows + Linux artifacts)
+Use the script below to build Windows binaries and Linux binaries (`x86_64-unknown-linux-gnu`) in one run.
+It will auto-check Docker Desktop and install `cross` if missing.
+Linux audio system dependencies are prepared automatically via `Cross.toml`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-all.ps1
+```
+
+Double-click alternative:
+
+```bat
+.\scripts\build-all.cmd
+```
+
+Setup only (no build):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-all.ps1 -SetupOnly
+```
+
 Now you are ready to build server and bridge.
 ### Server
 ```sh
