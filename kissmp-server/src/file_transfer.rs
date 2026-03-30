@@ -1,7 +1,8 @@
 use crate::*;
 use tokio::io::AsyncReadExt;
 
-const CHUNK_SIZE: usize = 65536;
+// Larger chunks reduce per-chunk stream/setup overhead significantly.
+const CHUNK_SIZE: usize = 262_144;
 
 // FIXME
 pub async fn transfer_file(
@@ -13,8 +14,10 @@ pub async fn transfer_file(
     let file_length = metadata.len() as u32;
     let file_name = path.file_name().unwrap().to_str().unwrap();
     let mut buf = [0; CHUNK_SIZE];
+    let file_name = file_name.to_string();
     let mut chunk_n = 0;
-    while let Ok(n) = file.read(&mut buf).await {
+    loop {
+        let n = file.read(&mut buf).await?;
         if n == 0 {
             break;
         }
@@ -22,7 +25,7 @@ pub async fn transfer_file(
         send(
             &mut stream,
             &bincode::serialize(&shared::ServerCommand::FilePart(
-                file_name.to_string(),
+                file_name.clone(),
                 buf[0..n].to_vec(),
                 chunk_n,
                 file_length,
