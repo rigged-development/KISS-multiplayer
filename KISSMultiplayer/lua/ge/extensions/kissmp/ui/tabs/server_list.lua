@@ -20,9 +20,6 @@ local filtered_servers = {}
 local filtered_favorite_servers = {}
 local next_bridge_status_update = 0
 
-local server_to_connect = nil
-local popup_open = false
-
 M.server_list = {}
 
 -- Server list update and search
@@ -189,11 +186,8 @@ local function draw(dt)
       imgui.PopTextWrapPos()
       if imgui.Button("Connect###connect_button_" .. tostring(server_count)) then
         kissconfig.save_config()
-        server_to_connect = {
-          addr = addr, 
-          player_name = ffi.string(kissui.player_name)
-        }
-        popup_open = true
+        local player_name = ffi.string(kissui.player_name)
+        network.connect(addr, player_name, true)
       end
 
       local in_favorites_list = kissui.tabs.favorites.favorite_servers[addr] ~= nil
@@ -220,31 +214,6 @@ local function draw(dt)
   if imgui.Button("Refresh List", imgui.ImVec2(-1, 0)) then
     refresh_server_list()
     update_filtered_servers()
-  end
-
-  if popup_open then
-    imgui.OpenPopup("Allow Server Mods?")
-    popup_open = false
-  end
-
-  if imgui.BeginPopupModal("Allow Server Mods?", nil, bit.bor(imgui.WindowFlags_AlwaysAutoResize)) then
-    imgui.Text("Allow this server to download mods to your computer?\n(Only download mods from trusted sources!)")
-    imgui.Dummy(imgui.ImVec2(0, 5))
-    
-    if imgui.Button("Yes, allow", imgui.ImVec2(120, 0)) then
-      network.connect(server_to_connect.addr, server_to_connect.player_name, true, true)
-      imgui.CloseCurrentPopup()
-    end
-    imgui.SameLine()
-    if imgui.Button("No, vanilla only", imgui.ImVec2(120, 0)) then
-      network.connect(server_to_connect.addr, server_to_connect.player_name, true, false)
-      imgui.CloseCurrentPopup()
-    end
-    imgui.SameLine()
-    if imgui.Button("Cancel", imgui.ImVec2(80, 0)) then
-      imgui.CloseCurrentPopup()
-    end
-    imgui.EndPopup()
   end
 end
 

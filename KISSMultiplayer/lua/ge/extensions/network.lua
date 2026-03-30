@@ -273,9 +273,8 @@ local function change_map(map)
   end
 end
 
-local function connect(addr, player_name, is_public, allow_downloads)
+local function connect(addr, player_name, is_public)
   M.is_server_public = is_public or false
-  M.allow_downloads = allow_downloads or false
 
   if M.connection.connected then
     disconnect()
@@ -362,18 +361,12 @@ local function connect(addr, player_name, is_public, allow_downloads)
   end
   if #missing_mods > 0 then
     -- Do not allow public servers to force mod downloads if user rejects
-    if M.is_server_public and not M.allow_downloads then
-      kissui.chat.add_message("Mod downloads rejected for this public server")
+    if M.is_server_public then
+      kissui.chat.add_message("Connection rejected: Missing mods.", kissui.COLOR_RED)
       disconnect()
       return
     else
-      -- Request mods when using direct IP, or if user allows
-      send_data(
-        {
-          RequestMods = missing_mods
-        },
-        true
-      )
+      send_data({ RequestMods = missing_mods }, true)
     end
   end
   vehiclemanager.loading_map = true
