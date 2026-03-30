@@ -105,7 +105,7 @@ local function handle_file_transfer(data)
   local file_len = bytesToU32(data:sub(1, 4))
   local file_name = data:sub(5, #data)
   local chunks = math.floor(file_len / FILE_TRANSFER_CHUNK_SIZE)
-
+  
   current_download = {
     file_len = file_len,
     file_name = file_name,
@@ -178,9 +178,7 @@ local function handle_player_disconnected(data)
 end
 
 local function handle_bridge_mod_downloaded(name)
-    if not name then
-        return
-    end
+  if not name then return end
 
     kissmods.mount_mod(name)
     local status = M.downloads_status[name]
@@ -201,11 +199,11 @@ local function handle_bridge_mod_downloaded(name)
 
     M.connection.mods_left = math.max((M.connection.mods_left or 0) - 1, 0)
 
-    if M.connection.mods_left <= 0 then
-        M.downloading = false
-        kissui.show_download = false
-        on_finished_download()
-    end
+  if M.connection.mods_left <= 0 then
+    M.downloading = false
+    kissui.show_download = false
+    on_finished_download()
+  end
 end
 
 local function update_download_speed(status, received_bytes)
@@ -246,9 +244,7 @@ local function update_download_speed(status, received_bytes)
 end
 
 local function handle_bridge_mod_download_progress(data)
-    if not data or not data.name then
-        return
-    end
+  if not data or not data.name then return end
 
     local status = M.downloads_status[data.name]
     if not status then
@@ -328,12 +324,12 @@ local function send_data(raw_data, reliable)
   if data_size > CHUNK_SIZE then
     print("Large data detected: " .. data_size .. " bytes, sending in chunks")
     local num_chunks = math.ceil(data_size / CHUNK_SIZE)
-
+    
     for i = 0, num_chunks - 1 do
       local start_pos = i * CHUNK_SIZE + 1
       local end_pos = math.min((i + 1) * CHUNK_SIZE, data_size)
       local chunk = data:sub(start_pos, end_pos)
-
+      
       local chunk_data = jsonEncode({
         DataChunk = {
           chunk_index = i,
@@ -345,14 +341,14 @@ local function send_data(raw_data, reliable)
       local len = ffi.string(ffi.new("uint32_t[?]", 1, {#chunk_data}), 4)
       M.connection.tcp:send(string.char(1)..len)
       M.connection.tcp:send(chunk_data)
-
+      
       print("Sent chunk " .. (i + 1) .. "/" .. num_chunks)
     end
-
+    
     print("All chunks sent successfully")
     return 0
   end
-
+  
   -- Send normally
   local len = ffi.string(ffi.new("uint32_t[?]", 1, {data_size}), 4)
   if reliable then
@@ -371,7 +367,7 @@ local function sanitize_addr(addr)
 
   -- Check if port is missing, add default port if so
   if not sanitized:find(":") then
-    sanitized = sanitized .. ":3698"
+    sanitized = sanitized .. ":3698" 
   end
   return sanitized
 end
@@ -382,23 +378,23 @@ local function generate_secret(server_identifier)
 end
 
 local function get_bridge_mods_dir()
-    local base = nil
+  local base = nil
 
-    if type(getUserPath) == "function" then
-        base = getUserPath()
-    end
+  if type(getUserPath) == "function" then
+    base = getUserPath()
+  end
 
-    if (not base or base == "") and FS and type(FS.getUserPath) == "function" then
-        base = FS:getUserPath()
-    end
+  if (not base or base == "") and FS and type(FS.getUserPath) == "function" then
+    base = FS:getUserPath()
+  end
 
-    if not base or base == "" then
-        return ""
-    end
+  if not base or base == "" then
+    return ""
+  end
 
-    base = tostring(base)
-    base = base:gsub("[/\\]+$", "")
-    return base .. "/kissmp_mods"
+  base = tostring(base)
+  base = base:gsub("[/\\]+$", "")
+  return base .. "/kissmp_mods"
 end
 
 local function change_map(map)
@@ -431,24 +427,24 @@ local function connect(addr, player_name, is_public)
   M.connection.tcp:send(addr_lenght)
   M.connection.tcp:send(addr)
 
-    -- Provide bridge with the real mods directory from the current Lua environment.
-    local mods_dir = get_bridge_mods_dir()
-    local mods_dir_length = ffi.string(ffi.new("uint32_t[?]", 1, { #mods_dir }), 4)
-    M.connection.tcp:send(mods_dir_length)
-    if #mods_dir > 0 then
-        M.connection.tcp:send(mods_dir)
-    end
+  -- Provide bridge with the real mods directory from the current Lua environment.
+  local mods_dir = get_bridge_mods_dir()
+  local mods_dir_length = ffi.string(ffi.new("uint32_t[?]", 1, {#mods_dir}), 4)
+  M.connection.tcp:send(mods_dir_length)
+  if #mods_dir > 0 then
+    M.connection.tcp:send(mods_dir)
+  end
 
-    local connection_confirmed = M.connection.tcp:receive(1)
-    if connection_confirmed then
-        if connection_confirmed ~= string.char(1) then
-            kissui.chat.add_message("Connection failed.", kissui.COLOR_RED)
-            return
-        end
-    else
-        kissui.chat.add_message("Failed to confirm connection. Check if bridge is running.", kissui.COLOR_RED)
-        return
+  local connection_confirmed = M.connection.tcp:receive(1)
+  if connection_confirmed then
+    if connection_confirmed ~= string.char(1) then
+      kissui.chat.add_message("Connection failed.", kissui.COLOR_RED)
+      return
     end
+  else
+    kissui.chat.add_message("Failed to confirm connection. Check if bridge is running.", kissui.COLOR_RED)
+    return
+  end
 
     -- Ignore message type
   M.connection.tcp:receive(1)
@@ -577,13 +573,13 @@ local function send_ping()
 end
 
 local function cancel_download()
-    --[[if not current_download then return end
-    io.close(current_download.file)
-    current_download = nil
-      M.downloading = false]]--
-    for k, v in pairs(M.downloads) do
-        M.downloads[k]:close()
-    end
+  --[[if not current_download then return end
+  io.close(current_download.file)
+  current_download = nil
+    M.downloading = false]]--
+  for k, v in pairs(M.downloads) do
+     M.downloads[k]:close()
+  end
   M.downloads = {}
   M.downloads_meta = {}
   M.downloads_status = {}
@@ -603,46 +599,43 @@ local function onUpdate(dt)
   frame_time_budget = math.min(frame_time_budget, BINARY_FRAME_TIME_BUDGET_MAX)
   local binary_chunks_processed = 0
   local binary_bytes_processed = 0
-    while true do
+  while true do
     if binary_chunks_processed > 0 then
       if binary_chunks_processed >= MAX_BINARY_CHUNKS_PER_UPDATE then break end
       if binary_bytes_processed >= MAX_BINARY_BYTES_PER_UPDATE then break end
       if (socket.gettime() - update_start) >= frame_time_budget then break end
     end
 
-        local msg_type = M.connection.tcp:receive(1)
-        if not msg_type then
-            break
+    local msg_type = M.connection.tcp:receive(1)
+    if not msg_type then break end
+    --print("msg_t"..string.byte(msg_type))
+    M.connection.tcp:settimeout(5.0)
+    -- JSON data
+    if string.byte(msg_type) == 1 then
+      local data = M.connection.tcp:receive(4)
+      local len = bytesToU32(data)
+      local data, _, _ = M.connection.tcp:receive(len)
+      M.connection.tcp:settimeout(0.0)
+      local data_decoded = jsonDecode(data)
+      for k, v in pairs(data_decoded) do
+        if message_handlers[k] then
+          message_handlers[k](v)
         end
-        --print("msg_t"..string.byte(msg_type))
-        M.connection.tcp:settimeout(5.0)
-        -- JSON data
-        if string.byte(msg_type) == 1 then
-            local data = M.connection.tcp:receive(4)
-            local len = bytesToU32(data)
-            local data, _, _ = M.connection.tcp:receive(len)
-            M.connection.tcp:settimeout(0.0)
-            local data_decoded = jsonDecode(data)
-            for k, v in pairs(data_decoded) do
-                if message_handlers[k] then
-                    message_handlers[k](v)
-                end
-            end
-        elseif string.byte(msg_type) == 0 then
-            -- Binary data
-            M.downloading = true
-            kissui.show_download = true
-            local name_b = M.connection.tcp:receive(4)
-            local len_n = bytesToU32(name_b)
-            local name, _, _ = M.connection.tcp:receive(len_n)
-            local chunk_n_b = M.connection.tcp:receive(4)
-            local chunk_a_b = M.connection.tcp:receive(4)
-            local read_size_b = M.connection.tcp:receive(4)
-            local chunk_n = bytesToU32(chunk_n_b)
-            local chunk_a = bytesToU32(chunk_a_b)
-            local read_size = bytesToU32(read_size_b)
-            local file_length = chunk_a
-            local file_data, _, _ = M.connection.tcp:receive(read_size)
+      end
+    elseif string.byte(msg_type) == 0 then -- Binary data
+      M.downloading = true
+      kissui.show_download = true
+      local name_b = M.connection.tcp:receive(4)
+      local len_n = bytesToU32(name_b)
+      local name, _, _ = M.connection.tcp:receive(len_n)
+      local chunk_n_b = M.connection.tcp:receive(4)
+      local chunk_a_b = M.connection.tcp:receive(4)
+      local read_size_b = M.connection.tcp:receive(4)
+      local chunk_n = bytesToU32(chunk_n_b)
+      local chunk_a = bytesToU32(chunk_a_b)
+      local read_size = bytesToU32(read_size_b)
+      local file_length = chunk_a
+      local file_data, _, _ = M.connection.tcp:receive(read_size)
 
       local meta = M.downloads_meta[name]
       if not meta then
@@ -665,11 +658,11 @@ local function onUpdate(dt)
         M.downloads_status[name] = status
       end
 
-            local file = M.downloads[name]
-            if not file then
-                M.downloads[name] = kissmods.open_file(name)
-            end
-            M.downloads[name]:write(file_data)
+      local file = M.downloads[name]
+      if not file then
+        M.downloads[name] = kissmods.open_file(name)
+      end
+      M.downloads[name]:write(file_data)
       meta.received = meta.received + read_size
       status.progress = math.min(meta.received / math.max(file_length, 1), 1)
       status.completed = false
@@ -692,15 +685,15 @@ local function onUpdate(dt)
           kissui.show_download = false
           on_finished_download()
         end
-            end
-            M.connection.tcp:settimeout(0.0)
-        elseif string.byte(msg_type) == 2 then
-            local len_b = M.connection.tcp:receive(4)
-            local len = bytesToU32(len_b)
-            local reason, _, _ = M.connection.tcp:receive(len)
-            disconnect(reason)
-        end
+      end
+      M.connection.tcp:settimeout(0.0)
+    elseif string.byte(msg_type) == 2 then
+      local len_b = M.connection.tcp:receive(4)
+      local len = bytesToU32(len_b)
+      local reason, _, _ = M.connection.tcp:receive(len)
+      disconnect(reason)
     end
+  end
 end
 
 local function get_client_id()
