@@ -35,7 +35,7 @@ pub struct ServerInfo {
     pub map: String,
     pub tickrate: u8,
     pub max_vehicles_per_client: u8,
-    pub mods: Vec<(String, u32)>,
+    pub mods: Vec<(String, u32, String)>,
     pub server_identifier: String,
 }
 
