@@ -1,24 +1,58 @@
 local M = {}
 M.mods = {}
 
-local function normalize_sha1(value)
-  if not value then return nil end
+local function normalize_hash(value, algo)
+  if not value or not algo then return nil end
   local s = string.lower(tostring(value))
-  s = s:gsub("^sha1[:=]", "")
+  s = s:gsub("^" .. algo .. "[:=]", "")
+  if algo == "crc32" then
+    s = s:gsub("^crc[:=]", "")
+  end
   s = s:gsub("[^0-9a-f]", "")
-  if #s == 40 then
+
+  local expected_len = nil
+  if algo == "sha1" then
+    expected_len = 40
+  elseif algo == "crc32" then
+    expected_len = 8
+  end
+
+  if expected_len and #s == expected_len then
     return s
   end
   return nil
 end
 
-local function get_file_sha1(path)
-  if type(hashFileSHA1) == "function" then
-    return normalize_sha1(hashFileSHA1(path))
+local function parse_server_hash(value)
+  if not value then return nil, nil end
+  local s = string.lower(tostring(value))
+  local algo, raw = s:match("^([a-z0-9_%-]+)[:=](.+)$")
+
+  if not algo then
+    raw = s
+    if raw:match("^[0-9a-f]+$") and #raw == 8 then
+      algo = "crc32"
+    elseif raw:match("^[0-9a-f]+$") and #raw == 40 then
+      algo = "sha1"
+    else
+      return nil, nil
+    end
+  end
+
+  if algo == "crc" then
+    algo = "crc32"
+  end
+
+  return algo, normalize_hash(raw, algo)
+end
+
+local function get_file_hash(path, algo)
+  if algo == "sha1" and type(hashFileSHA1) == "function" then
+    return normalize_hash(hashFileSHA1(path), algo)
   elseif type(hashFile) == "function" then
-    return normalize_sha1(hashFile(path, "sha1") or hashFile(path))
+    return normalize_hash(hashFile(path, algo) or hashFile(path), algo)
   elseif FS and type(FS.hashFile) == "function" then
-    return normalize_sha1(FS:hashFile(path, "sha1") or FS:hashFile(path))
+    return normalize_hash(FS:hashFile(path, algo) or FS:hashFile(path), algo)
   end
   return nil
 end
@@ -47,7 +81,7 @@ local function build_local_size_index()
   return size_index
 end
 
-local function build_local_hash_index()
+local function build_local_hash_index(algo)
   local hash_index = {}
   local candidates = {}
 
@@ -59,7 +93,7 @@ local function build_local_hash_index()
   end
 
   for path, _ in pairs(candidates) do
-    local h = get_file_sha1(path)
+    local h = get_file_hash(path, algo)
     if h then
       if not hash_index[h] then
         hash_index[h] = path
@@ -156,7 +190,7 @@ local function mount_mods(list)
   core_vehicles.clearCache()
 end
 
-local function update_status(mod, local_hash_index, local_size_index)
+local function update_status(mod, local_hash_index_by_algo, local_size_index)
   mod.debug_reason = nil
   mod.local_hash = nil
   mod.local_path = nil
@@ -168,7 +202,11 @@ local function update_status(mod, local_hash_index, local_size_index)
     table.insert(search_results, v)
   end
   
-  local server_hash = normalize_sha1(mod.hash)
+  local server_algo, server_hash = parse_server_hash(mod.hash)
+  local local_hash_index = nil
+  if server_algo and local_hash_index_by_algo then
+    local_hash_index = local_hash_index_by_algo[server_algo]
+  end
 
   if not search_results[1] then
     if server_hash and local_hash_index then
@@ -199,7 +237,7 @@ local function update_status(mod, local_hash_index, local_size_index)
   else
     mod.local_path = search_results[1]
     if server_hash then
-      local local_hash = get_file_sha1(search_results[1])
+      local local_hash = get_file_hash(search_results[1], server_algo)
 
       mod.local_hash = local_hash
 
@@ -248,7 +286,10 @@ local function update_status(mod, local_hash_index, local_size_index)
 end
 
 local function update_status_all()
-  local local_hash_index = build_local_hash_index()
+  local local_hash_index = {
+    sha1 = build_local_hash_index("sha1"),
+    crc32 = build_local_hash_index("crc32"),
+  }
   local local_size_index = build_local_size_index()
   for name, mod in pairs(M.mods) do
     update_status(mod, local_hash_index, local_size_index)

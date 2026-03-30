@@ -20,7 +20,7 @@ use anyhow::{Context, Error};
 use futures::FutureExt;
 use futures::{select, StreamExt, TryStreamExt};
 use log::{error, info, warn, debug};
-use sha1::{Digest, Sha1};
+use crc32fast::Hasher as Crc32Hasher;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::Read;
@@ -686,7 +686,7 @@ pub fn list_mods(
         let file = std::fs::File::open(path.clone())?;
         let metadata = file.metadata()?;
         let mut file_for_hash = std::fs::File::open(path.clone())?;
-        let mut hasher = Sha1::new();
+        let mut hasher = Crc32Hasher::new();
         let mut hash_buf = [0u8; 64 * 1024];
         loop {
             let read_bytes = file_for_hash.read(&mut hash_buf)?;
@@ -695,7 +695,7 @@ pub fn list_mods(
             }
             hasher.update(&hash_buf[..read_bytes]);
         }
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = format!("crc32:{:08x}", hasher.finalize());
 
         result.push((file_name, metadata.len() as u32, hash));
         raw.push(path);
