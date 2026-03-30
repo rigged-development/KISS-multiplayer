@@ -1,6 +1,6 @@
 local M = {}
 
-M.VERSION_STR = "latest"
+M.VERSION_STR = "0.7.0"
 M.is_server_public = false
 
 M.downloads = {}
@@ -19,15 +19,15 @@ M.players = {}
 M.socket = socket
 M.base_secret = "None"
 M.connection = {
-    tcp = nil,
-    connected = false,
-    client_id = 0,
-    heartbeat_time = 1,
-    timer = 0,
-    tickrate = 33,
-    mods_left = 0,
-    ping = 0,
-    time_offset = 0
+  tcp = nil,
+  connected = false,
+  client_id = 0,
+  heartbeat_time = 1,
+  timer = 0,
+  tickrate = 33,
+  mods_left = 0,
+  ping = 0,
+  time_offset = 0
 }
 
 local FILE_TRANSFER_CHUNK_SIZE = 65536;
@@ -42,137 +42,139 @@ local DOWNLOAD_SPEED_SAMPLE_MIN = 0.2
 local message_handlers = {}
 
 local time_offset_smoother = {
-    samples = {},
-    current_sample = 1,
+  samples = {},
+  current_sample = 1,
 }
 
 time_offset_smoother.get = function(new_sample)
-    if time_offset_smoother.current_sample < 30 then
-        time_offset_smoother.samples[time_offset_smoother.current_sample] = new_sample
-    else
-        time_offset_smoother.current_sample = 0
-    end
-    time_offset_smoother.current_sample = time_offset_smoother.current_sample + 1
-    local sum = 0
-    local n = 0
-    for _, v in pairs(time_offset_smoother.samples) do
-        sum = sum + v
-        n = n + 1
-    end
-    return sum / n
+  if time_offset_smoother.current_sample < 30 then
+    time_offset_smoother.samples[time_offset_smoother.current_sample] = new_sample
+  else
+    time_offset_smoother.current_sample = 0
+  end
+  time_offset_smoother.current_sample = time_offset_smoother.current_sample + 1
+  local sum = 0
+  local n = 0
+  for _, v in pairs(time_offset_smoother.samples) do
+    sum = sum + v
+    n = n + 1
+  end
+  return sum / n
 end
 
 local function bytesToU32(str)
-    local b1, b2, b3, b4 = str:byte(1, 4)
-    return bit.bor(
-            bit.lshift(b4, 24),
-            bit.lshift(b3, 16),
-            bit.lshift(b2, 8),
-            b1
-    )
+  local b1, b2, b3, b4 = str:byte(1, 4)
+  return bit.bor(
+      bit.lshift(b4, 24),
+      bit.lshift(b3, 16),
+      bit.lshift(b2, 8),
+      b1
+  )
 end
 
 local function disconnect(data)
-    local text = "Disconnected!"
-    if data then
-        text = text .. " Reason: " .. data
-    end
-    kissui.chat.add_message(text)
-    M.connection.connected = false
-    M.connection.tcp:close()
-    M.players = {}
-    kissplayers.players = {}
-    kissplayers.player_transforms = {}
-    kissplayers.players_in_cars = {}
-    kissplayers.player_heads_attachments = {}
-    kissrichpresence.update()
-    --vehiclemanager.id_map = {}
-    --vehiclemanager.ownership = {}
-    --vehiclemanager.delay_spawns = false
-    --kissui.force_disable_nametags = false
-    --Lua:requestReload()
-    --kissutils.hooks.clear()
-    returnToMainMenu()
+  local text = "Disconnected!"
+  if data then
+    text = text.." Reason: "..data
+  end
+  kissui.chat.add_message(text)
+  M.connection.connected = false
+  M.connection.tcp:close()
+  M.players = {}
+  kissplayers.players = {}
+  kissplayers.player_transforms = {}
+  kissplayers.players_in_cars = {}
+  kissplayers.player_heads_attachments = {}
+  kissrichpresence.update()
+  --vehiclemanager.id_map = {}
+  --vehiclemanager.ownership = {}
+  --vehiclemanager.delay_spawns = false
+  --kissui.force_disable_nametags = false
+  --Lua:requestReload()
+  --kissutils.hooks.clear()
+  returnToMainMenu()
 end
 
 local function handle_disconnected(data)
-    disconnect(data)
+  disconnect(data)
 end
 
 local function handle_file_transfer(data)
-    kissui.show_download = true
-    -- local file_len = ffi.cast("uint32_t*", ffi.new("char[?]", 5, data:sub(1, 4)))[0]
-    local file_len = bytesToU32(data:sub(1, 4))
-    local file_name = data:sub(5, #data)
-    local chunks = math.floor(file_len / FILE_TRANSFER_CHUNK_SIZE)
+  kissui.show_download = true
+  -- local file_len = ffi.cast("uint32_t*", ffi.new("char[?]", 5, data:sub(1, 4)))[0]
+  local file_len = bytesToU32(data:sub(1, 4))
+  local file_name = data:sub(5, #data)
+  local chunks = math.floor(file_len / FILE_TRANSFER_CHUNK_SIZE)
 
-    current_download = {
-        file_len = file_len,
-        file_name = file_name,
-        chunks = chunks,
-        last_chunk = file_len - chunks * FILE_TRANSFER_CHUNK_SIZE,
-        current_chunk = 0,
-        file = kissmods.open_file(file_name)
-    }
-    M.downloading = true
+  current_download = {
+    file_len = file_len,
+    file_name = file_name,
+    chunks = chunks,
+    last_chunk = file_len - chunks * FILE_TRANSFER_CHUNK_SIZE,
+    current_chunk = 0,
+    file = kissmods.open_file(file_name)
+  }
+  M.downloading = true
 end
 
 local function handle_player_info(player_info)
     M.players[player_info.id] = player_info
+    local saved_volume = kissui.voice_player_volumes[player_info.id]
+    if saved_volume ~= nil and kissvoicechat and kissvoicechat.set_player_volume then
+        kissvoicechat.set_player_volume(player_info.id, saved_volume)
+    end
 end
 
 local function check_lua(l)
-    local filters = { "FS", "check_lua", "handle_lua", "handle_vehicle_lua", "network =", "network=", "message_handlers", "io%.write", "io%.open", "io%.close", "fileOpen", "fileExists", "removeDirectory", "removeFile", "io%." }
-    for k, v in pairs(filters) do
-        if string.find(l, v) ~= nil then
-            kissui.chat.add_message("Possibly malicious lua command has been send, rejecting. Found: " .. v)
-            return false
-        end
+  local filters = {"FS", "check_lua", "handle_lua", "handle_vehicle_lua", "network =", "network=", "message_handlers", "io%.write", "io%.open", "io%.close", "fileOpen", "fileExists", "removeDirectory", "removeFile", "io%."}
+  for k, v in pairs(filters) do
+    if string.find(l, v) ~= nil then
+      kissui.chat.add_message("Possibly malicious lua command has been send, rejecting. Found: "..v)
+      return false
     end
-    return true
+  end
+  return true
 end
 
 local function handle_lua(data)
-    if M.is_server_public then
-        print("Blocked arbitrary Lua command from public server.")
-        return
+  if M.is_server_public then
+      print("Blocked arbitrary Lua command from public server.")
+      return
     end
 
-    if check_lua(data) then
-        Lua:queueLuaCommand(data)
-    end
+  if check_lua(data) then
+    Lua:queueLuaCommand(data)
+  end
 end
 
 local function handle_vehicle_lua(data)
-    if M.is_server_public then
-        print("Blocked arbitrary vehicle Lua command from public server.")
-        return
-    end
+  if M.is_server_public then
+    print("Blocked arbitrary vehicle Lua command from public server.")
+    return
+  end
 
-    local id = data[1]
-    local lua = data[2]
-    local id = vehiclemanager.id_map[id or -1] or 0
-    local vehicle = be:getObjectByID(id)
-    if vehicle and check_lua(lua) then
-        vehicle:queueLuaCommand(lua)
-    end
+  local id = data[1]
+  local lua = data[2]
+  local id = vehiclemanager.id_map[id or -1] or 0
+  local vehicle = be:getObjectByID(id)
+  if vehicle and check_lua(lua) then
+    vehicle:queueLuaCommand(lua)
+  end
 end
 
 local function handle_pong(data)
-    local server_time = data
-    local local_time = socket.gettime()
-    local ping = local_time - ping_send_time
-    if ping > 1 then
-        return
-    end
-    local time_diff = server_time - local_time + (ping / 2)
-    M.connection.time_offset = time_offset_smoother.get(time_diff)
-    M.connection.ping = ping * 1000
+  local server_time = data
+  local local_time = socket.gettime()
+  local ping = local_time - ping_send_time
+  if ping > 1 then return end
+  local time_diff = server_time - local_time + (ping / 2)
+  M.connection.time_offset = time_offset_smoother.get(time_diff)
+  M.connection.ping = ping * 1000
 end
 
 local function handle_player_disconnected(data)
-    local id = data
-    M.players[id] = nil
+  local id = data
+  M.players[id] = nil
 end
 
 local function handle_bridge_mod_downloaded(name)
@@ -272,7 +274,17 @@ local function handle_bridge_mod_download_progress(data)
 end
 
 local function handle_chat(data)
-    kissui.chat.add_message(data[1], nil, data[2])
+  kissui.chat.add_message(data[1], nil, data[2])
+end
+
+local function handle_bridge_voice_input_devices(devices)
+    if type(devices) ~= "table" then
+        return
+    end
+    kissui.voice_input_devices = devices
+    if kissui.voice_input_device == "" and #devices > 0 then
+        kissui.voice_input_device = tostring(devices[1])
+    end
 end
 
 local function onExtensionLoaded()
@@ -286,6 +298,7 @@ local function onExtensionLoaded()
     message_handlers.VehicleMetaUpdate = vehiclemanager.update_vehicle_meta
     message_handlers.Pong = handle_pong
     message_handlers.PlayerDisconnected = handle_player_disconnected
+    message_handlers.BridgeVoiceInputDevices = handle_bridge_voice_input_devices
     message_handlers.BridgeModDownloaded = handle_bridge_mod_downloaded
     message_handlers.BridgeModDownloadProgress = handle_bridge_mod_download_progress
     message_handlers.VehicleLuaCommand = handle_vehicle_lua
@@ -299,75 +312,73 @@ local function onExtensionLoaded()
 end
 
 local function send_data(raw_data, reliable)
-    if type(raw_data) == "number" then
-        print("NOT IMPLEMENTED. PLEASE REPORT TO KISSMP DEVELOPERS. CODE: " .. raw_data)
-        return
-    end
-    if not M.connection.connected then
-        return -1
-    end
-    local data = ""
-    if type(raw_data) == "string" then
-        data = raw_data
-    else
-        data = jsonEncode(raw_data)
-    end
-    local data_size = #data
-    -- Auto-chunk if data is too large
-    if data_size > CHUNK_SIZE then
-        print("Large data detected: " .. data_size .. " bytes, sending in chunks")
-        local num_chunks = math.ceil(data_size / CHUNK_SIZE)
+  if type(raw_data) == "number" then
+    print("NOT IMPLEMENTED. PLEASE REPORT TO KISSMP DEVELOPERS. CODE: "..raw_data)
+    return
+  end
+  if not M.connection.connected then return -1 end
+  local data = ""
+  if type(raw_data) == "string" then
+    data = raw_data
+  else
+    data = jsonEncode(raw_data)
+  end
+  local data_size = #data
+  -- Auto-chunk if data is too large
+  if data_size > CHUNK_SIZE then
+    print("Large data detected: " .. data_size .. " bytes, sending in chunks")
+    local num_chunks = math.ceil(data_size / CHUNK_SIZE)
 
-        for i = 0, num_chunks - 1 do
-            local start_pos = i * CHUNK_SIZE + 1
-            local end_pos = math.min((i + 1) * CHUNK_SIZE, data_size)
-            local chunk = data:sub(start_pos, end_pos)
+    for i = 0, num_chunks - 1 do
+      local start_pos = i * CHUNK_SIZE + 1
+      local end_pos = math.min((i + 1) * CHUNK_SIZE, data_size)
+      local chunk = data:sub(start_pos, end_pos)
 
-            local chunk_data = jsonEncode({
-                DataChunk = {
-                    chunk_index = i,
-                    total_chunks = num_chunks,
-                    data = chunk
-                }
-            })
+      local chunk_data = jsonEncode({
+        DataChunk = {
+          chunk_index = i,
+          total_chunks = num_chunks,
+          data = chunk
+        }
+      })
 
-            local len = ffi.string(ffi.new("uint32_t[?]", 1, { #chunk_data }), 4)
-            M.connection.tcp:send(string.char(1) .. len)
-            M.connection.tcp:send(chunk_data)
+      local len = ffi.string(ffi.new("uint32_t[?]", 1, {#chunk_data}), 4)
+      M.connection.tcp:send(string.char(1)..len)
+      M.connection.tcp:send(chunk_data)
 
-            print("Sent chunk " .. (i + 1) .. "/" .. num_chunks)
-        end
-
-        print("All chunks sent successfully")
-        return 0
+      print("Sent chunk " .. (i + 1) .. "/" .. num_chunks)
     end
 
-    -- Send normally
-    local len = ffi.string(ffi.new("uint32_t[?]", 1, { data_size }), 4)
-    if reliable then
-        reliable = 1
-    else
-        reliable = 0
-    end
-    M.connection.tcp:send(string.char(reliable) .. len)
-    M.connection.tcp:send(data)
+    print("All chunks sent successfully")
     return 0
+  end
+
+  -- Send normally
+  local len = ffi.string(ffi.new("uint32_t[?]", 1, {data_size}), 4)
+  if reliable then
+    reliable = 1
+  else
+    reliable = 0
+  end
+  M.connection.tcp:send(string.char(reliable)..len)
+  M.connection.tcp:send(data)
+  return 0
 end
 
 local function sanitize_addr(addr)
-    -- Trim leading and trailing spaces that might occur during a copy/paste
-    local sanitized = addr:gsub("^%s*(.-)%s*$", "%1")
+  -- Trim leading and trailing spaces that might occur during a copy/paste
+  local sanitized = addr:gsub("^%s*(.-)%s*$", "%1")
 
-    -- Check if port is missing, add default port if so
-    if not sanitized:find(":") then
-        sanitized = sanitized .. ":3698"
-    end
-    return sanitized
+  -- Check if port is missing, add default port if so
+  if not sanitized:find(":") then
+    sanitized = sanitized .. ":3698"
+  end
+  return sanitized
 end
 
 local function generate_secret(server_identifier)
-    local secret = server_identifier .. M.base_secret
-    return hashStringSHA1(secret)
+  local secret = server_identifier..M.base_secret
+  return hashStringSHA1(secret)
 end
 
 local function get_bridge_mods_dir()
@@ -391,34 +402,34 @@ local function get_bridge_mods_dir()
 end
 
 local function change_map(map)
-    if FS:fileExists(map) or FS:directoryExists(map) then
-        vehiclemanager.loading_map = true
-        freeroam_freeroam.startFreeroam(map)
-    else
-        kissui.chat.add_message("Map file doesn't exist. Check if mod containing map is enabled", kissui.COLOR_RED)
-        disconnect()
-    end
+  if FS:fileExists(map) or FS:directoryExists(map) then
+    vehiclemanager.loading_map = true
+    freeroam_freeroam.startFreeroam(map)
+  else
+    kissui.chat.add_message("Map file doesn't exist. Check if mod containing map is enabled", kissui.COLOR_RED)
+    disconnect()
+  end
 end
 
 local function connect(addr, player_name, is_public)
-    M.is_server_public = is_public or false
+  M.is_server_public = is_public or false
 
-    if M.connection.connected then
-        disconnect()
-    end
-    M.players = {}
+  if M.connection.connected then
+    disconnect()
+  end
+  M.players = {}
 
-    print("Connecting...")
-    addr = sanitize_addr(addr)
-    kissui.chat.add_message("Connecting to " .. addr .. "...")
-    M.connection.tcp = socket.tcp()
-    M.connection.tcp:settimeout(3.0)
-    local connected, err = M.connection.tcp:connect("127.0.0.1", "7894")
+  print("Connecting...")
+  addr = sanitize_addr(addr)
+  kissui.chat.add_message("Connecting to "..addr.."...")
+  M.connection.tcp = socket.tcp()
+  M.connection.tcp:settimeout(3.0)
+  local connected, err = M.connection.tcp:connect("127.0.0.1", "7894")
 
-    -- Send server address to the bridge
-    local addr_lenght = ffi.string(ffi.new("uint32_t[?]", 1, { #addr }), 4)
-    M.connection.tcp:send(addr_lenght)
-    M.connection.tcp:send(addr)
+  -- Send server address to the bridge
+  local addr_lenght = ffi.string(ffi.new("uint32_t[?]", 1, {#addr}), 4)
+  M.connection.tcp:send(addr_lenght)
+  M.connection.tcp:send(addr)
 
     -- Provide bridge with the real mods directory from the current Lua environment.
     local mods_dir = get_bridge_mods_dir()
@@ -440,125 +451,129 @@ local function connect(addr, player_name, is_public)
     end
 
     -- Ignore message type
-    M.connection.tcp:receive(1)
+  M.connection.tcp:receive(1)
 
-    local len, _, _ = M.connection.tcp:receive(4)
-    len = bytesToU32(len)
+  local len, _, _ = M.connection.tcp:receive(4)
+  len = bytesToU32(len)
 
-    local received, _, _ = M.connection.tcp:receive(len)
-    print(received)
-    local server_info = jsonDecode(received).ServerInfo
-    if not server_info then
-        print("Failed to fetch server info")
-        return
-    end
-    print("Server name: " .. server_info.name)
-    print("Player count: " .. server_info.player_count)
+  local received, _, _ = M.connection.tcp:receive(len)
+  print(received)
+  local server_info = jsonDecode(received).ServerInfo
+  if not server_info then
+    print("Failed to fetch server info")
+    return
+  end
+  print("Server name: "..server_info.name)
+  print("Player count: "..server_info.player_count)
 
-    M.connection.tcp:settimeout(0.0)
-    M.connection.connected = true
-    M.connection.client_id = server_info.client_id
-    M.connection.server_info = server_info
-    M.connection.tickrate = server_info.tickrate
+  M.connection.tcp:settimeout(0.0)
+  M.connection.connected = true
+  M.connection.client_id = server_info.client_id
+  M.connection.server_info = server_info
+  M.connection.tickrate = server_info.tickrate
 
-    local steamid64 = nil
-    if Steam and Steam.isWorking then
-        steamid64 = Steam.accountID ~= "0" and Steam.accountID or nil
-    end
+  local steamid64 = nil
+  if Steam and Steam.isWorking then
+    steamid64 = Steam.accountID ~= "0" and Steam.accountID or nil
+  end
 
-    local client_info = {
-        ClientInfo = {
-            name = player_name,
-            secret = generate_secret(server_info.server_identifier),
-            steamid64 = steamid64,
-            client_version = { 0, 8 }
-        }
+  local client_info = {
+    ClientInfo = {
+      name = player_name,
+      secret = generate_secret(server_info.server_identifier),
+      steamid64 = steamid64,
+      client_version = {0, 7}
     }
-    send_data(client_info, true)
+  }
+  send_data(client_info, true)
 
-    kissmods.set_mods_list(server_info.mods)
-    kissmods.update_status_all()
+  if kissvoicechat and kissvoicechat.apply_settings then
+      kissvoicechat.apply_settings()
+  end
 
-    local missing_mods = {}
-    local mod_names = {}
-    for _, mod in pairs(kissmods.mods) do
-        table.insert(mod_names, mod.name)
-        if mod.status ~= "ok" then
-            print(string.format(
-                    "[KISSMP][MOD-CHECK] request=%s status=%s reason=%s server_hash=%s local_hash=%s size=%s",
-                    tostring(mod.name),
-                    tostring(mod.status),
-                    tostring(mod.debug_reason or "unknown"),
-                    tostring(mod.hash or ""),
-                    tostring(mod.local_hash or ""),
-                    tostring(mod.size or 0)
-            ))
-            table.insert(missing_mods, mod.name)
-            M.downloads_status[mod.name] = { name = mod.name, progress = 0, received_bytes = 0, speed_bps = 0, completed = false }
-        else
-            print(string.format(
-                    "[KISSMP][MOD-CHECK] keep=%s status=ok reason=%s hash=%s",
-                    tostring(mod.name),
-                    tostring(mod.debug_reason or "ok"),
-                    tostring(mod.hash or "")
-            ))
-        end
-    end
-    M.connection.mods_left = #missing_mods
+  kissmods.set_mods_list(server_info.mods)
+  kissmods.update_status_all()
 
-    kissmods.deactivate_all_mods()
-    for k, v in pairs(missing_mods) do
-        print(k .. " " .. v)
+  local missing_mods = {}
+  local mod_names = {}
+  for _, mod in pairs(kissmods.mods) do
+    table.insert(mod_names, mod.name)
+    if mod.status ~= "ok" then
+      print(string.format(
+        "[KISSMP][MOD-CHECK] request=%s status=%s reason=%s server_hash=%s local_hash=%s size=%s",
+        tostring(mod.name),
+        tostring(mod.status),
+        tostring(mod.debug_reason or "unknown"),
+        tostring(mod.hash or ""),
+        tostring(mod.local_hash or ""),
+        tostring(mod.size or 0)
+      ))
+      table.insert(missing_mods, mod.name)
+      M.downloads_status[mod.name] = {name = mod.name, progress = 0}
+    else
+      print(string.format(
+        "[KISSMP][MOD-CHECK] keep=%s status=ok reason=%s hash=%s",
+        tostring(mod.name),
+        tostring(mod.debug_reason or "ok"),
+        tostring(mod.hash or "")
+      ))
     end
-    if #missing_mods > 0 then
-        -- Do not allow public servers to force mod downloads
-        if M.is_server_public then
-            kissui.chat.add_message("Cannot auto-download mods from public servers")
-            disconnect()
-            return
-        else
-            M.downloading = true
-            kissui.show_download = true
-            -- Request mods when using direct IP
-            send_data(
-                    {
-                        RequestMods = missing_mods
-                    },
-                    true
-            )
-        end
+  end
+  M.connection.mods_left = #missing_mods
+
+  kissmods.deactivate_all_mods()
+  for k, v in pairs(missing_mods) do
+    print(k.." "..v)
+  end
+  if #missing_mods > 0 then
+    -- Do not allow public servers to force mod downloads
+    if M.is_server_public then
+      kissui.chat.add_message("Cannot auto-download mods from public servers")
+      disconnect()
+      return
+    else
+        M.downloading = true
+        kissui.show_download = true
+      -- Request mods when using direct IP
+      send_data(
+        {
+          RequestMods = missing_mods
+        },
+        true
+      )
     end
-    vehiclemanager.loading_map = true
-    if #missing_mods == 0 then
-        kissmods.mount_mods(mod_names)
-        change_map(server_info.map)
-    end
-    kissrichpresence.update()
-    kissui.chat.add_message("Connected!")
+  end
+  vehiclemanager.loading_map = true
+  if #missing_mods == 0 then
+    kissmods.mount_mods(mod_names)
+    change_map(server_info.map)
+  end
+  kissrichpresence.update()
+  kissui.chat.add_message("Connected!")
 end
 
 local function send_messagepack(data_type, reliable, data)
-    local data = data
-    if type(data) == "string" then
-        data = jsonDecode(data)
-    end
-    data = messagepack.pack(data)
-    send_data(data_type, reliable, data)
+  local data = data
+  if type(data) == "string" then
+    data = jsonDecode(data)
+  end
+  data = messagepack.pack(data)
+  send_data(data_type, reliable, data)
 end
 
-on_finished_download = function()
-    vehiclemanager.loading_map = true
-    change_map(M.connection.server_info.map)
+local function on_finished_download()
+  vehiclemanager.loading_map = true
+  change_map(M.connection.server_info.map)
 end
 
 local function send_ping()
-    ping_send_time = socket.gettime()
-    send_data(
-            {
-                Ping = math.floor(M.connection.ping),
-            },
-            false
-    )
+  ping_send_time = socket.gettime()
+  send_data(
+    {
+      Ping = math.floor(M.connection.ping),
+    },
+    false
+  )
 end
 
 local function cancel_download()
@@ -575,15 +590,13 @@ local function cancel_download()
 end
 
 local function onUpdate(dt)
-    if not M.connection.connected then
-        return
-    end
-    if M.connection.timer < M.connection.heartbeat_time then
-        M.connection.timer = M.connection.timer + dt
-    else
-        M.connection.timer = 0
-        send_ping()
-    end
+  if not M.connection.connected then return end
+  if M.connection.timer < M.connection.heartbeat_time then
+    M.connection.timer = M.connection.timer + dt
+  else
+    M.connection.timer = 0
+    send_ping()
+  end
 
   local update_start = socket.gettime()
   local frame_time_budget = math.max(BINARY_FRAME_TIME_BUDGET_MIN, dt * BINARY_FRAME_TIME_BUDGET_RATIO)
@@ -691,7 +704,7 @@ local function onUpdate(dt)
 end
 
 local function get_client_id()
-    return M.connection.client_id
+  return M.connection.client_id
 end
 
 local function onLoadingScreenFadeout()
