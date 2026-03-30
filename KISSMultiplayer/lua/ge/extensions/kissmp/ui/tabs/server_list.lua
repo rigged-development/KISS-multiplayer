@@ -1,7 +1,6 @@
 local M = {}
 local imgui = ui_imgui
 local http = require("socket.http")
-local VERSION_PRTL = "0.7.0"
 
 local filter_servers_notfull = imgui.BoolPtr(false)
 local filter_servers_notempty = imgui.BoolPtr(false)
@@ -21,6 +20,8 @@ local filtered_favorite_servers = {}
 local next_bridge_status_update = 0
 
 M.server_list = {}
+M.last_master_error = nil
+M.last_master_status = nil
 
 -- Server list update and search
 -- spairs from https://stackoverflow.com/a/15706820
@@ -87,15 +88,62 @@ local function update_filtered_servers(m)
   --filtered_favorite_servers = filter_server_list(kissui.tabs.favorites.favorite_servers, term, filter_notfull, filter_online, m)
 end
 
+local function get_master_version_path()
+  local version = "latest"
+  if network and type(network.VERSION_STR) == "string" and network.VERSION_STR ~= "" then
+    version = network.VERSION_STR
+  end
+
+  version = tostring(version):gsub("^/+", ""):gsub("/+$", "")
+  if version == "" then
+    version = "latest"
+  end
+  return version
+end
+
+local function build_master_list_url(kissui)
+  local master = tostring(kissui.master_addr or ""):gsub("/+$", "") -- trailing / entfernen
+  local version = get_master_version_path()
+  return ("http://127.0.0.1:3693/%s/%s"):format(master, version)
+end
+
 local function refresh_server_list(m)
   local kissui = kissui or m
-  local b, _, _  = http.request("http://127.0.0.1:3693/check")
-  if b and b == "ok" then
+  local check_body = http.request("http://127.0.0.1:3693/check")
+  if check_body and check_body == "ok" then
     kissui.bridge_launched = true
+  else
+    kissui.bridge_launched = false
+    M.last_master_status = nil
+    M.last_master_error = "Bridge is not reachable on 127.0.0.1:3693"
+    return
   end
-  local b, _, _  = http.request("http://127.0.0.1:3693/"..kissui.master_addr.."/"..VERSION_PRTL)
-  if b then
-    M.server_list = jsonDecode(b) or {}
+
+  local list_url = build_master_list_url(kissui)
+  local body, code, _, status_line = http.request(list_url)
+  M.last_master_status = status_line
+
+  if not body then
+    M.last_master_error = "Master request failed: " .. tostring(code)
+    return
+  end
+
+  if type(body) == "string" and body:sub(1, 12) == "proxy_error:" then
+    M.last_master_error = body
+    return
+  end
+
+  if type(body) == "string" and body:find("outdated version of KissMP", 1, true) then
+    M.last_master_error = "Version mismatch with master list endpoint. Tried version path: " .. get_master_version_path()
+    return
+  end
+
+  local decoded = jsonDecode(body)
+  if decoded then
+    M.server_list = decoded
+    M.last_master_error = nil
+  else
+    M.last_master_error = "Master returned invalid response"
   end
 end
 
@@ -204,6 +252,8 @@ local function draw(dt)
   imgui.PushTextWrapPos(0)
   if not kissui.bridge_launched then
     imgui.Text("Bridge is not launched. Please, launch the bridge and then hit 'Refresh list' button")
+  elseif M.last_master_error then
+    imgui.Text("Could not refresh server list: " .. tostring(M.last_master_error))
   elseif server_count == 0 then
     imgui.Text("Server list is empty")
   end

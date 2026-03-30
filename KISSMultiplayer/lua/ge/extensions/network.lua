@@ -1,6 +1,6 @@
 local M = {}
 
-M.VERSION_STR = "0.7.0"
+M.VERSION_STR = "latest"
 
 M.downloads = {}
 M.downloads_meta = {}

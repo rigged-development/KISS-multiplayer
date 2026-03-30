@@ -18,7 +18,7 @@ M.tabs = {
 
 M.dependencies = {"ui_imgui"}
 
-M.master_addr = "http://kissmp.online:3692/"
+M.master_addr = "http://kiss.beamapex.com:3692"
 M.bridge_launched = false
 
 M.show_download = false

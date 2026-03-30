@@ -12,6 +12,8 @@ pub struct Config {
     pub max_vehicles_per_client: u8,
     pub show_in_server_list: bool,
     pub upnp_enabled: bool,
+    pub master_url: String,
+    pub master_p2p_host: String,
     pub server_identifier: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mods: Option<Vec<String>>,
@@ -29,6 +31,8 @@ impl Default for Config {
             port: 3698,
             show_in_server_list: false,
             upnp_enabled: false,
+            master_url: "http://kissmp.online:3692".to_string(),
+            master_p2p_host: "kissmp.online:3691".to_string(),
             server_identifier: rand_string(),
             mods: None,
         }
