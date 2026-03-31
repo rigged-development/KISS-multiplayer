@@ -18,6 +18,17 @@ local filter_queued = false
 local filtered_servers = {}
 local filtered_favorite_servers = {}
 local next_bridge_status_update = 0
+local add_master_alias = imgui.ArrayChar(64)
+local add_master_url = imgui.ArrayChar(256)
+local add_master_p2p_host = imgui.ArrayChar(128)
+local add_master_error = nil
+local edit_master_alias = imgui.ArrayChar(64)
+local edit_master_url = imgui.ArrayChar(256)
+local edit_master_p2p_host = imgui.ArrayChar(128)
+local edit_master_error = nil
+local edit_master_loaded_id = nil
+
+local refresh_server_list
 
 M.server_list = {}
 M.last_master_error = nil
@@ -102,12 +113,223 @@ local function get_master_version_path()
 end
 
 local function build_master_list_url(kissui)
-  local master = tostring(kissui.master_addr or ""):gsub("/+$", "") -- trailing / entfernen
+  if kissui.ensure_master_server_config then
+    kissui.ensure_master_server_config()
+  end
+
+  local selected_master = nil
+  if kissui.get_selected_master_server then
+    selected_master = kissui.get_selected_master_server()
+  end
+
+  local master = tostring((selected_master and selected_master.master_url) or kissui.master_addr or ""):gsub("/+$", "")
   local version = get_master_version_path()
   return ("http://127.0.0.1:3693/%s/%s"):format(master, version)
 end
 
-local function refresh_server_list(m)
+local function current_master_alias(kissui)
+  if kissui.get_selected_master_server then
+    local selected = kissui.get_selected_master_server()
+    if selected then
+      return tostring(selected.alias or selected.master_url or "Unknown")
+    end
+  end
+  return "Unknown"
+end
+
+local function find_master_by_id(master_servers, id)
+  for _, entry in ipairs(master_servers or {}) do
+    if entry.id == id then
+      return entry
+    end
+  end
+  return nil
+end
+
+local function is_protected_master_id(id)
+  return id == "kissmp_official" or id == "beamapex"
+end
+
+local function select_fallback_master(kissui)
+  local official = find_master_by_id(kissui.master_servers, "kissmp_official")
+  if official then
+    return official.id
+  end
+  if kissui.master_servers and #kissui.master_servers > 0 then
+    return kissui.master_servers[1].id
+  end
+  return nil
+end
+
+local function load_edit_buffers_from_selected(selected)
+  edit_master_alias = imgui.ArrayChar(64, tostring(selected.alias or ""))
+  edit_master_url = imgui.ArrayChar(256, tostring(selected.master_url or ""))
+  edit_master_p2p_host = imgui.ArrayChar(128, tostring(selected.master_p2p_host or ""))
+  edit_master_loaded_id = selected.id
+  edit_master_error = nil
+end
+
+local function make_unique_master_id(alias, master_servers)
+  local base = tostring(alias or "")
+    :lower()
+    :gsub("[^%w]+", "_")
+    :gsub("^_+", "")
+    :gsub("_+$", "")
+
+  if base == "" then
+    base = "custom_master"
+  end
+
+  local candidate = base
+  local counter = 1
+  while find_master_by_id(master_servers, candidate) do
+    candidate = base .. "_" .. tostring(counter)
+    counter = counter + 1
+  end
+  return candidate
+end
+
+local function draw_master_selector(m)
+  local kissui = kissui or m
+  if kissui.ensure_master_server_config then
+    kissui.ensure_master_server_config()
+  end
+
+  imgui.Text("Master Server:")
+  if imgui.BeginCombo("##master_server_select", current_master_alias(kissui)) then
+    for i, entry in ipairs(kissui.master_servers or {}) do
+      local selected = (entry.id == kissui.selected_master_id)
+      local label = tostring(entry.alias) .. "###master_server_" .. tostring(i)
+      if imgui.Selectable1(label, selected) then
+        kissui.selected_master_id = entry.id
+        if kissui.ensure_master_server_config then
+          kissui.ensure_master_server_config()
+        end
+        kissconfig.save_config()
+        refresh_server_list(kissui)
+        update_filtered_servers(kissui)
+      end
+    end
+    imgui.EndCombo()
+  end
+
+  local selected = nil
+  if kissui.get_selected_master_server then
+    selected = kissui.get_selected_master_server()
+  end
+
+  if selected then
+    imgui.Text("URL: " .. tostring(selected.master_url or ""))
+  end
+
+  if imgui.CollapsingHeader1("Master Server Management###master_server_management") then
+    if selected then
+      if edit_master_loaded_id ~= selected.id then
+        load_edit_buffers_from_selected(selected)
+      end
+
+      imgui.Text("Edit Selected Master")
+      if is_protected_master_id(selected.id) then
+        imgui.Text("This default entry is read-only and can not be deleted")
+      else
+        imgui.InputText("Alias##edit_master_alias", edit_master_alias)
+        imgui.InputText("Master URL##edit_master_url", edit_master_url)
+        imgui.InputText("Master P2P Host##edit_master_p2p", edit_master_p2p_host)
+
+        if imgui.Button("Save Changes##save_master_changes") then
+          local alias = tostring(ffi.string(edit_master_alias)):gsub("^%s*(.-)%s*$", "%1")
+          local master_url = tostring(ffi.string(edit_master_url)):gsub("^%s*(.-)%s*$", "%1")
+          local master_p2p_host = tostring(ffi.string(edit_master_p2p_host)):gsub("^%s*(.-)%s*$", "%1")
+
+          if alias == "" then
+            edit_master_error = "Alias darf nicht leer sein"
+          elseif master_url == "" then
+            edit_master_error = "Master URL darf nicht leer sein"
+          else
+            selected.alias = alias
+            selected.master_url = master_url
+            selected.master_p2p_host = master_p2p_host
+            if kissui.ensure_master_server_config then
+              kissui.ensure_master_server_config()
+            end
+            kissconfig.save_config()
+            edit_master_error = nil
+            refresh_server_list(kissui)
+            update_filtered_servers(kissui)
+          end
+        end
+
+        imgui.SameLine()
+        if imgui.Button("Delete##delete_master") then
+          for i = #kissui.master_servers, 1, -1 do
+            if kissui.master_servers[i].id == selected.id then
+              table.remove(kissui.master_servers, i)
+              break
+            end
+          end
+          kissui.selected_master_id = select_fallback_master(kissui)
+          if kissui.ensure_master_server_config then
+            kissui.ensure_master_server_config()
+          end
+          kissconfig.save_config()
+          edit_master_loaded_id = nil
+          edit_master_error = nil
+          refresh_server_list(kissui)
+          update_filtered_servers(kissui)
+        end
+
+        if edit_master_error then
+          imgui.Text("Fehler: " .. tostring(edit_master_error))
+        end
+      end
+    end
+
+    imgui.Separator()
+    imgui.Text("Add Master Server")
+    imgui.InputText("Alias##master_alias", add_master_alias)
+    imgui.InputText("Master URL##master_url", add_master_url)
+    imgui.InputText("Master P2P Host##master_p2p", add_master_p2p_host)
+
+    if imgui.Button("Add Master##add_master") then
+      local alias = tostring(ffi.string(add_master_alias)):gsub("^%s*(.-)%s*$", "%1")
+      local master_url = tostring(ffi.string(add_master_url)):gsub("^%s*(.-)%s*$", "%1")
+      local master_p2p_host = tostring(ffi.string(add_master_p2p_host)):gsub("^%s*(.-)%s*$", "%1")
+
+      if alias == "" then
+        add_master_error = "Alias darf nicht leer sein"
+      elseif master_url == "" then
+        add_master_error = "Master URL darf nicht leer sein"
+      else
+        local id = make_unique_master_id(alias, kissui.master_servers)
+        table.insert(kissui.master_servers, {
+          id = id,
+          alias = alias,
+          master_url = master_url,
+          master_p2p_host = master_p2p_host,
+        })
+        kissui.selected_master_id = id
+        if kissui.ensure_master_server_config then
+          kissui.ensure_master_server_config()
+        end
+        kissconfig.save_config()
+        add_master_alias = imgui.ArrayChar(64)
+        add_master_url = imgui.ArrayChar(256)
+        add_master_p2p_host = imgui.ArrayChar(128)
+        add_master_error = nil
+        refresh_server_list(kissui)
+        update_filtered_servers(kissui)
+      end
+    end
+
+    if add_master_error then
+      imgui.Text("Fehler: " .. tostring(add_master_error))
+    end
+  end
+
+  imgui.Separator()
+end
+
+refresh_server_list = function(m)
   local kissui = kissui or m
   local check_body = http.request("http://127.0.0.1:3693/check")
   if check_body and check_body == "ok" then
@@ -215,6 +437,7 @@ local function draw(dt)
 
   time_since_filters_change = time_since_filters_change + dt
 
+  draw_master_selector()
   draw_list_search_and_filters(false)
 
   local server_count = 0

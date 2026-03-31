@@ -18,7 +18,53 @@ M.tabs = {
 
 M.dependencies = {"ui_imgui"}
 
-M.master_addr = "http://kiss.beamapex.com:3692"
+local function default_master_servers()
+  return {
+    {
+      id = "kissmp_official",
+      alias = "KissMP Official",
+      master_url = "http://kissmp.online:3692",
+      master_p2p_host = "kissmp.online:3691"
+    },
+    {
+      id = "beamapex",
+      alias = "BeamApex",
+      master_url = "http://152.53.82.215:3692",
+      master_p2p_host = "152.53.82.215:3691"
+    }
+  }
+end
+
+local function sanitize_master_entry(entry)
+  if type(entry) ~= "table" then return nil end
+
+  local alias = tostring(entry.alias or ""):gsub("^%s*(.-)%s*$", "%1")
+  local master_url = tostring(entry.master_url or ""):gsub("^%s*(.-)%s*$", "%1")
+  local master_p2p_host = tostring(entry.master_p2p_host or ""):gsub("^%s*(.-)%s*$", "%1")
+  local id = tostring(entry.id or ""):gsub("^%s*(.-)%s*$", "%1")
+
+  if alias == "" or master_url == "" then
+    return nil
+  end
+  if id == "" then
+    id = alias:lower():gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", "")
+    if id == "" then
+      id = "custom_master"
+    end
+  end
+
+  return {
+    id = id,
+    alias = alias,
+    master_url = master_url,
+    master_p2p_host = master_p2p_host,
+  }
+end
+
+M.master_servers = default_master_servers()
+M.selected_master_id = "kissmp_official"
+M.master_addr = "http://kissmp.online:3692"
+M.master_p2p_host = "kissmp.online:3691"
 M.bridge_launched = false
 
 M.show_download = false
@@ -86,6 +132,7 @@ local function toggle_ui()
 end
 
 local function open_ui()
+  M.ensure_master_server_config()
   main_window.init(M)
   gui_module.initialize(M.gui)
   M.gui.registerWindow("KissMP", imgui.ImVec2(256, 256))
@@ -120,6 +167,77 @@ local function onUpdate(dt)
   end
   if (not M.force_disable_nametags) and M.show_nametags[0] then
     names.draw()
+  end
+end
+
+function M.get_selected_master_server()
+  for _, entry in ipairs(M.master_servers or {}) do
+    if entry.id == M.selected_master_id then
+      return entry
+    end
+  end
+  return nil
+end
+
+function M.ensure_master_server_config()
+  local defaults = default_master_servers()
+  local by_id = {}
+  local custom_order = {}
+
+  local configured = {}
+  if type(M.master_servers) == "table" then
+    for _, raw_entry in ipairs(M.master_servers) do
+      local entry = sanitize_master_entry(raw_entry)
+      if entry and not by_id[entry.id] then
+        by_id[entry.id] = entry
+        if entry.id ~= "kissmp_official" and entry.id ~= "beamapex" then
+          table.insert(custom_order, entry.id)
+        end
+      end
+    end
+  end
+
+  for _, default_entry in ipairs(defaults) do
+    if not by_id[default_entry.id] then
+      by_id[default_entry.id] = sanitize_master_entry(default_entry)
+    end
+  end
+
+  for _, default_entry in ipairs(defaults) do
+    table.insert(configured, by_id[default_entry.id])
+    by_id[default_entry.id] = nil
+  end
+
+  -- Keep custom entries in stable insertion order to avoid UI flicker.
+  for _, id in ipairs(custom_order) do
+    local entry = by_id[id]
+    if entry then
+      table.insert(configured, entry)
+      by_id[id] = nil
+    end
+  end
+
+  -- Fallback for unexpected leftovers (should be rare), keep deterministic output.
+  local leftover_ids = {}
+  for id, _ in pairs(by_id) do
+    table.insert(leftover_ids, id)
+  end
+  table.sort(leftover_ids)
+  for _, id in ipairs(leftover_ids) do
+    table.insert(configured, by_id[id])
+  end
+
+  M.master_servers = configured
+
+  local selected = M.get_selected_master_server()
+  if not selected and #M.master_servers > 0 then
+    M.selected_master_id = M.master_servers[1].id
+    selected = M.master_servers[1]
+  end
+
+  if selected then
+    M.master_addr = selected.master_url
+    M.master_p2p_host = selected.master_p2p_host
   end
 end
 

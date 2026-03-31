@@ -38,6 +38,10 @@ local function save_config()
     voice_noise_suppression_level = kissui.voice_noise_gate_strength[0],
     voice_echo_suppression_level = kissui.voice_echo_ducking_strength[0],
     voice_player_volumes = kissui.voice_player_volumes or {},
+    master_addr = kissui.master_addr,
+    master_p2p_host = kissui.master_p2p_host,
+    master_servers = kissui.master_servers or {},
+    selected_master_id = kissui.selected_master_id,
     base_secret_v2 = secret
   }
   local file = io.open("./settings/kissmp_config.json", "w")
@@ -56,6 +60,27 @@ local function load_config()
   local content = file:read("*a")
   local config = jsonDecode(content or "")
   if not config then return end
+
+  if type(config.master_servers) == "table" then
+    kissui.master_servers = config.master_servers
+  end
+  if config.selected_master_id ~= nil then
+    kissui.selected_master_id = tostring(config.selected_master_id)
+  end
+  if config.master_addr ~= nil and (type(config.master_servers) ~= "table" or #config.master_servers == 0) then
+    kissui.master_servers = {
+      {
+        id = "legacy_master",
+        alias = "Legacy Master",
+        master_url = tostring(config.master_addr),
+        master_p2p_host = tostring(config.master_p2p_host or "")
+      }
+    }
+    kissui.selected_master_id = "legacy_master"
+  end
+  if kissui.ensure_master_server_config then
+    kissui.ensure_master_server_config()
+  end
 
   if config.name ~= nil then
     kissui.player_name = imgui.ArrayChar(32, config.name)
@@ -143,6 +168,9 @@ end
 
 local function init()
   load_config()
+  if kissui.ensure_master_server_config then
+    kissui.ensure_master_server_config()
+  end
   if #FS:findFiles("/mods/", "kissmultiplayer.zip", 1000) == 0 then
     kissui.incorrect_install = true
   end
