@@ -125,6 +125,15 @@ async fn handle_file_part_in_bridge(
             (state.received as f64 / state.expected_size as f64).min(1.0)
         };
 
+/*        info!(
+            "Processed mod chunk: {} (+{} bytes, {}/{} bytes, {:.2}%)",
+            safe_name,
+            data.len(),
+            state.received,
+            state.expected_size,
+            progress * 100.0
+        );*/
+
         let now = Instant::now();
         let should_send_progress = progress >= 1.0
             || now.duration_since(state.last_progress_sent_at) >= PROGRESS_UPDATE_INTERVAL
@@ -137,9 +146,21 @@ async fn handle_file_part_in_bridge(
                     "progress": progress
                 }
             }));
-            server_commands_sender.send(progress_msg).await?;
-            state.last_progress_sent_at = now;
-            state.last_progress_sent_value = progress;
+            match server_commands_sender.try_send(progress_msg) {
+                Ok(()) => {
+                    state.last_progress_sent_at = now;
+                    state.last_progress_sent_value = progress;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    debug!(
+                        "Skipping mod progress update for {} because outbound channel is full",
+                        safe_name
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(anyhow::Error::msg("Server command channel closed"));
+                }
+            }
         }
 
         state.received >= state.expected_size
@@ -455,7 +476,11 @@ async fn connect_to_server(
         match result {
             Ok(_) => info!("Tasks completed successfully"),
             Err(e) => {
-                error!("Tasks ended due to exception: {}", e);
+                if is_expected_shutdown(&e) {
+                    info!("Tasks stopped: {}", e);
+                } else {
+                    error!("Tasks ended due to exception: {}", e);
+                }
                 discord_tx.send(DiscordState { server_name: None }).unwrap();
             }
         }
@@ -499,6 +524,10 @@ fn server_command_to_client_bytes(command: shared::ServerCommand) -> Vec<u8> {
 }
 
 type AHResult = Result<(), anyhow::Error>;
+
+fn is_expected_shutdown(err: &anyhow::Error) -> bool {
+    err.to_string().contains("game client disconnected")
+}
 
 async fn handle_server_command_in_bridge(
     server_commands_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
@@ -566,39 +595,62 @@ async fn server_incoming(
         .map(|data| async { Ok::<_, anyhow::Error>(data?.to_vec()) })
         .buffer_unordered(1024);
 
+    let (reliable_bytes_tx, mut reliable_bytes_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2048);
+    let mut reliable_reader_tasks = FuturesUnordered::new();
+    let mut reliable_streams_closed = false;
+    let mut unreliable_commands_closed = false;
+
     loop {
         tokio::select! {
-            stream = reliable_streams.next() => match stream {
+            stream = reliable_streams.next(), if !reliable_streams_closed => match stream {
                 Some(Ok(mut stream)) => {
-                    loop {
-                        match read_pascal_bytes(&mut stream).await {
-                            Ok(bytes) => {
-                                let command = bincode::deserialize::<shared::ServerCommand>(&bytes)?;
-                                handle_server_command_in_bridge(
-                                    &server_commands_sender,
-                                    &mut downloads,
-                                    &mods_dir,
-                                    &vc_playback_sender,
-                                    command,
-                                )
-                                .await?;
-                            }
-                            Err(e) => {
-                                if !is_stream_terminated(&e) {
-                                    warn!("Error reading reliable command stream: {}", e);
+                    let reliable_bytes_tx = reliable_bytes_tx.clone();
+                    reliable_reader_tasks.push(tokio::spawn(async move {
+                        loop {
+                            match read_pascal_bytes(&mut stream).await {
+                                Ok(bytes) => {
+                                    if reliable_bytes_tx.send(bytes).await.is_err() {
+                                        break;
+                                    }
                                 }
-                                break;
+                                Err(e) => {
+                                    if !is_stream_terminated(&e) {
+                                        warn!("Error reading reliable command stream: {}", e);
+                                    }
+                                    break;
+                                }
                             }
                         }
-                    }
+                        Ok::<(), anyhow::Error>(())
+                    }));
                 }
                 Some(Err(e)) => {
                     warn!("Error accepting reliable stream: {}", e);
-                    break;
+                    reliable_streams_closed = true;
                 }
-                None => break,
+                None => {
+                    reliable_streams_closed = true;
+                }
             },
-            command = unreliable_commands.next() => match command {
+            Some(result) = reliable_reader_tasks.next(), if !reliable_reader_tasks.is_empty() => {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!("Reliable stream reader task failed: {}", e),
+                    Err(e) => warn!("Reliable stream reader join error: {}", e),
+                }
+            },
+            Some(bytes) = reliable_bytes_rx.recv() => {
+                let command = bincode::deserialize::<shared::ServerCommand>(&bytes)?;
+                handle_server_command_in_bridge(
+                    &server_commands_sender,
+                    &mut downloads,
+                    &mods_dir,
+                    &vc_playback_sender,
+                    command,
+                )
+                .await?;
+            },
+            command = unreliable_commands.next(), if !unreliable_commands_closed => match command {
                 Some(Ok(bytes)) => {
                     if let Ok(command) = bincode::deserialize::<shared::ServerCommand>(&bytes) {
                         handle_server_command_in_bridge(
@@ -613,11 +665,20 @@ async fn server_incoming(
                 }
                 Some(Err(e)) => {
                     warn!("Error reading unreliable command: {}", e);
-                    break;
+                    unreliable_commands_closed = true;
                 }
-                None => break,
+                None => {
+                    unreliable_commands_closed = true;
+                }
             },
             else => break,
+        }
+
+        if reliable_streams_closed
+            && unreliable_commands_closed
+            && reliable_reader_tasks.is_empty()
+        {
+            break;
         }
     }
     info!("Server incoming closed");
@@ -728,7 +789,7 @@ async fn client_incoming(
     info!("Connection with game is closed");
     server_stream.close(0u32.into(), b"Client has left the game.");
     debug!("Client incoming closed");
-    Ok(())
+    Err(anyhow::Error::msg("game client disconnected"))
 }
 
 async fn server_outgoing(
@@ -786,3 +847,4 @@ impl rustls::client::ResolvesClientCert for ClientCertResolver {
         true
     }
 }
+
