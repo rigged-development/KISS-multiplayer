@@ -42,6 +42,7 @@ local function save_config()
     master_p2p_host = kissui.master_p2p_host,
     master_servers = kissui.master_servers or {},
     selected_master_id = kissui.selected_master_id,
+    aggregate_master_lists = kissui.aggregate_master_lists,
     base_secret_v2 = secret
   }
   local file = io.open("./settings/kissmp_config.json", "w")
@@ -66,6 +67,9 @@ local function load_config()
   end
   if config.selected_master_id ~= nil then
     kissui.selected_master_id = tostring(config.selected_master_id)
+  end
+  if config.aggregate_master_lists ~= nil then
+    kissui.aggregate_master_lists = not not config.aggregate_master_lists
   end
   if config.master_addr ~= nil and (type(config.master_servers) ~= "table" or #config.master_servers == 0) then
     kissui.master_servers = {

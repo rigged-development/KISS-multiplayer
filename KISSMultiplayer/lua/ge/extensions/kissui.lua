@@ -24,13 +24,15 @@ local function default_master_servers()
       id = "kissmp_official",
       alias = "KissMP Official",
       master_url = "http://kissmp.online:3692",
-      master_p2p_host = "kissmp.online:3691"
+      master_p2p_host = "kissmp.online:3691",
+      enabled_for_query = true,
     },
     {
       id = "beamapex",
       alias = "BeamApex",
       master_url = "http://152.53.82.215:3692",
-      master_p2p_host = "152.53.82.215:3691"
+      master_p2p_host = "152.53.82.215:3691",
+      enabled_for_query = true,
     }
   }
 end
@@ -42,6 +44,10 @@ local function sanitize_master_entry(entry)
   local master_url = tostring(entry.master_url or ""):gsub("^%s*(.-)%s*$", "%1")
   local master_p2p_host = tostring(entry.master_p2p_host or ""):gsub("^%s*(.-)%s*$", "%1")
   local id = tostring(entry.id or ""):gsub("^%s*(.-)%s*$", "%1")
+  local enabled_for_query = true
+  if entry.enabled_for_query ~= nil then
+    enabled_for_query = not not entry.enabled_for_query
+  end
 
   if alias == "" or master_url == "" then
     return nil
@@ -58,6 +64,7 @@ local function sanitize_master_entry(entry)
     alias = alias,
     master_url = master_url,
     master_p2p_host = master_p2p_host,
+    enabled_for_query = enabled_for_query,
   }
 end
 
@@ -65,6 +72,7 @@ M.master_servers = default_master_servers()
 M.selected_master_id = "kissmp_official"
 M.master_addr = "http://kissmp.online:3692"
 M.master_p2p_host = "kissmp.online:3691"
+M.aggregate_master_lists = true
 M.bridge_launched = false
 
 M.show_download = false
