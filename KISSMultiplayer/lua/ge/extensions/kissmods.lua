@@ -1,6 +1,13 @@
 local M = {}
 M.mods = {}
 
+local function normalize_mod_filename(name)
+  if not name then return "" end
+  local normalized = tostring(name):gsub("\\", "/")
+  local file_name = normalized:match("([^/]+)$") or normalized
+  return file_name
+end
+
 local function normalize_hash(value, algo)
   if not value or not algo then return nil end
   local s = string.lower(tostring(value))
@@ -162,22 +169,54 @@ end
 local function mount_mod(name)
   --local mode = mode or "added"
   --extensions.core_modmanager.workOffChangedMod("/kissmp_mods/"..name, mode)
-  if FS:fileExists("/kissmp_mods/"..name) then
-    FS:mount("/kissmp_mods/"..name)
-  else
-    files = FS:findFiles("/mods/", name, 1000)
-    if files[1] then
-      FS:mount(files[1])
-    else
-      local mod_data = M.mods[name]
-      if mod_data and mod_data.local_path and FS:fileExists(mod_data.local_path) then
-        FS:mount(mod_data.local_path)
-      else
-        kissui.chat.add_message("Failed to mount mod "..name..", file not found", kissui.COLOR_RED)
+  local file_name = normalize_mod_filename(name)
+  local mod_data = M.mods[name]
+  if not mod_data then
+    for _, mod in pairs(M.mods) do
+      if mod.file_name == file_name then
+        mod_data = mod
+        break
       end
     end
   end
+
+  local candidate_paths = {
+    "/kissmp_mods/"..name,
+  }
+  if file_name ~= "" and file_name ~= name then
+    table.insert(candidate_paths, "/kissmp_mods/"..file_name)
+  end
+  if mod_data and mod_data.local_path then
+    table.insert(candidate_paths, mod_data.local_path)
+  end
+
+  local mounted = false
+  for _, path in ipairs(candidate_paths) do
+    if FS:fileExists(path) then
+      FS:mount(path)
+      mounted = true
+      break
+    end
+  end
+
+  if not mounted then
+    local files = FS:findFiles("/mods/", name, 1000)
+    if (not files[1]) and file_name ~= "" then
+      files = FS:findFiles("/mods/", file_name, 1000)
+    end
+
+    if files[1] then
+      FS:mount(files[1])
+      mounted = true
+    end
+  end
+
+  if not mounted then
+    kissui.chat.add_message("Failed to mount mod "..file_name..", file not found", kissui.COLOR_RED)
+  end
+
   core_vehicles.clearCache()
+  return mounted
 end
 
 local function mount_mods(list)
@@ -195,8 +234,17 @@ local function update_status(mod, local_hash_index_by_algo, local_size_index)
   mod.local_hash = nil
   mod.local_path = nil
 
+  local search_name = mod.file_name or normalize_mod_filename(mod.name)
+
   local search_results = FS:findFiles("/kissmp_mods/", mod.name, 1)
+  if (not search_results[1]) and search_name ~= mod.name then
+    search_results = FS:findFiles("/kissmp_mods/", search_name, 1)
+  end
+
   local search_results2 = FS:findFiles("/mods/", mod.name, 99)
+  if (not search_results2[1]) and search_name ~= mod.name then
+    search_results2 = FS:findFiles("/mods/", search_name, 99)
+  end
 
   for _, v in pairs(search_results2) do
     table.insert(search_results, v)
@@ -299,9 +347,10 @@ end
 local function set_mods_list(mod_list)
   M.mods = {}
   for _, mod in pairs(mod_list) do
-    local mod_name = mod[1]
+    local mod_name = tostring(mod[1] or "")
     local mod_table = {
       name = mod_name,
+      file_name = normalize_mod_filename(mod_name),
       size = mod[2],
       hash = mod[3],
       status = "unknown"
@@ -311,11 +360,12 @@ local function set_mods_list(mod_list)
 end
 
 local function open_file(name)
-  if not string.endswith(name, ".zip") then return end
+  local safe_name = normalize_mod_filename(name)
+  if not string.endswith(string.lower(safe_name), ".zip") then return end
   if not FS:directoryExists("/kissmp_mods/") then
     FS:directoryCreate("/kissmp_mods/")
   end
-  local path = "/kissmp_mods/"..name
+  local path = "/kissmp_mods/"..safe_name
   print(path)
   local file = io.open(path, "wb")
   return file

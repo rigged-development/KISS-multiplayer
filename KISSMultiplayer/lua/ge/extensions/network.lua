@@ -87,6 +87,8 @@ local function disconnect(data)
   end
   M.downloading = false
   M.downloads_status = {}
+  M.connection.mods_left = 0
+  vehiclemanager.loading_map = false
   if not M.pending_mod_download then
     kissui.show_mod_download_risk = false
   end
@@ -191,7 +193,13 @@ end
 local function handle_bridge_mod_downloaded(name)
   if not name then return end
 
-    kissmods.mount_mod(name)
+    local mounted = kissmods.mount_mod(name)
+    if not mounted then
+      M.downloading = false
+      kissui.show_download = false
+      disconnect("Failed to mount downloaded mod: "..tostring(name))
+      return
+    end
     local status = M.downloads_status[name]
     if not status then
         status = {
@@ -213,7 +221,11 @@ local function handle_bridge_mod_downloaded(name)
   if M.connection.mods_left <= 0 then
     M.downloading = false
     kissui.show_download = false
-    on_finished_download()
+    if type(on_finished_download) == "function" then
+      on_finished_download()
+    else
+      disconnect("Internal error: missing download completion handler")
+    end
   end
 end
 
@@ -439,6 +451,14 @@ local function connect(addr, player_name, is_public)
   M.connection.tcp:send(addr_lenght)
   M.connection.tcp:send(addr)
 
+  -- Optional hint for bridge download target to match BeamNG user path.
+  local mods_dir = get_bridge_mods_dir()
+  local mods_dir_length = ffi.string(ffi.new("uint32_t[?]", 1, {#mods_dir}), 4)
+  M.connection.tcp:send(mods_dir_length)
+  if #mods_dir > 0 then
+    M.connection.tcp:send(mods_dir)
+  end
+
   local connection_confirmed = M.connection.tcp:receive(1)
   if connection_confirmed then
     if connection_confirmed ~= string.char(1) then
@@ -568,7 +588,13 @@ local function connect(addr, player_name, is_public)
   end
   vehiclemanager.loading_map = true
   if #missing_mods == 0 then
-    kissmods.mount_mods(mod_names)
+    for _, mod_name in ipairs(mod_names) do
+      local mounted = kissmods.mount_mod(mod_name)
+      if not mounted then
+        disconnect("Failed to mount required mod: "..tostring(mod_name))
+        return
+      end
+    end
     change_map(server_info.map)
   end
   kissrichpresence.update()
@@ -626,7 +652,17 @@ local function send_messagepack(data_type, reliable, data)
   send_data(data_type, reliable, data)
 end
 
-local function on_finished_download()
+on_finished_download = function()
+  kissmods.update_status_all()
+  for _, mod in pairs(kissmods.mods) do
+    if mod.status == "ok" then
+      local mounted = kissmods.mount_mod(mod.name)
+      if not mounted then
+        disconnect("Failed to mount required mod: "..tostring(mod.name))
+        return
+      end
+    end
+  end
   vehiclemanager.loading_map = true
   change_map(M.connection.server_info.map)
 end
@@ -669,42 +705,52 @@ local function onUpdate(dt)
   local binary_chunks_processed = 0
   local binary_bytes_processed = 0
   while true do
+    local tcp = M.connection.tcp
+    if not tcp or not M.connection.connected then
+      break
+    end
+
     if binary_chunks_processed > 0 then
       if binary_chunks_processed >= MAX_BINARY_CHUNKS_PER_UPDATE then break end
       if binary_bytes_processed >= MAX_BINARY_BYTES_PER_UPDATE then break end
       if (socket.gettime() - update_start) >= frame_time_budget then break end
     end
 
-    local msg_type = M.connection.tcp:receive(1)
+    local msg_type = tcp:receive(1)
     if not msg_type then break end
     --print("msg_t"..string.byte(msg_type))
-    M.connection.tcp:settimeout(5.0)
+    tcp:settimeout(5.0)
     -- JSON data
     if string.byte(msg_type) == 1 then
-      local data = M.connection.tcp:receive(4)
+      local data = tcp:receive(4)
       local len = bytesToU32(data)
-      local data, _, _ = M.connection.tcp:receive(len)
-      M.connection.tcp:settimeout(0.0)
+      local data, _, _ = tcp:receive(len)
+      if M.connection.tcp then
+        M.connection.tcp:settimeout(0.0)
+      end
       local data_decoded = jsonDecode(data)
       for k, v in pairs(data_decoded) do
         if message_handlers[k] then
           message_handlers[k](v)
+          if not M.connection.connected or not M.connection.tcp then
+            return
+          end
         end
       end
     elseif string.byte(msg_type) == 0 then -- Binary data
       M.downloading = true
       kissui.show_download = true
-      local name_b = M.connection.tcp:receive(4)
+      local name_b = tcp:receive(4)
       local len_n = bytesToU32(name_b)
-      local name, _, _ = M.connection.tcp:receive(len_n)
-      local chunk_n_b = M.connection.tcp:receive(4)
-      local chunk_a_b = M.connection.tcp:receive(4)
-      local read_size_b = M.connection.tcp:receive(4)
+      local name, _, _ = tcp:receive(len_n)
+      local chunk_n_b = tcp:receive(4)
+      local chunk_a_b = tcp:receive(4)
+      local read_size_b = tcp:receive(4)
       local chunk_n = bytesToU32(chunk_n_b)
       local chunk_a = bytesToU32(chunk_a_b)
       local read_size = bytesToU32(read_size_b)
       local file_length = chunk_a
-      local file_data, _, _ = M.connection.tcp:receive(read_size)
+      local file_data, _, _ = tcp:receive(read_size)
 
       local meta = M.downloads_meta[name]
       if not meta then
@@ -741,7 +787,13 @@ local function onUpdate(dt)
       binary_bytes_processed = binary_bytes_processed + read_size
 
       if meta.received >= file_length then
-                kissmods.mount_mod(name)
+                local mounted = kissmods.mount_mod(name)
+                if not mounted then
+                  M.downloading = false
+                  kissui.show_download = false
+                  disconnect("Failed to mount downloaded mod: "..tostring(name))
+                  return
+                end
                 M.downloads[name]:close()
                 M.downloads[name] = nil
         M.downloads_meta[name] = nil
@@ -752,15 +804,22 @@ local function onUpdate(dt)
         if M.connection.mods_left == 0 then
           M.downloading = false
           kissui.show_download = false
-          on_finished_download()
+          if type(on_finished_download) == "function" then
+            on_finished_download()
+          else
+            disconnect("Internal error: missing download completion handler")
+          end
         end
       end
-      M.connection.tcp:settimeout(0.0)
+      if M.connection.tcp then
+        M.connection.tcp:settimeout(0.0)
+      end
     elseif string.byte(msg_type) == 2 then
-      local len_b = M.connection.tcp:receive(4)
+      local len_b = tcp:receive(4)
       local len = bytesToU32(len_b)
-      local reason, _, _ = M.connection.tcp:receive(len)
+      local reason, _, _ = tcp:receive(len)
       disconnect(reason)
+      return
     end
   end
 end
