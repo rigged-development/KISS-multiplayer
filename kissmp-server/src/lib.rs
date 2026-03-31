@@ -87,6 +87,8 @@ pub struct Server {
     lua_commands: std::sync::mpsc::Receiver<lua::LuaCommand>,
     server_identifier: String,
     upnp_enabled: bool,
+    master_url: String,
+    master_p2p_host: String,
     upnp_port: Option<u16>,
     public_address: Option<String>,
     mods: Option<Vec<String>>,
@@ -157,6 +159,8 @@ impl Server {
             lua_commands: receiver,
             server_identifier: config.server_identifier,
             upnp_enabled: config.upnp_enabled,
+            master_url: config.master_url,
+            master_p2p_host: config.master_p2p_host,
             public_address: None,
             mods: config.mods,
             mod_transfer_chunk_size,
@@ -177,7 +181,7 @@ impl Server {
                 self.upnp_port = Some(port);
                 info!("Fetching public IP address...");
                 let socket = UdpSocket::bind(&addr).unwrap();
-                socket.connect("kissmp.online:3691");
+                let _ = socket.connect(&self.master_p2p_host);
                 let mut i = 0;
                 while i < 5 {
                     let _ = socket.send(b"hi");
@@ -316,9 +320,10 @@ impl Server {
         .to_string();
 
         let client = self.reqwest_client.clone();
+        let master_url = self.master_url.clone();
         tokio::spawn(async move {
             let _ = client
-                .post("http://kissmp.online:3692")
+                .post(master_url)
                 .body(server_info)
                 .send()
                 .await;

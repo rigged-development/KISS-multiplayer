@@ -85,9 +85,25 @@ pub async fn spawn_http_proxy(discord_tx: std::sync::mpsc::Sender<crate::Discord
                 request.respond(response).unwrap();
                 continue;
             }
-            if let Ok(response) = reqwest::get(&url).await {
-                if let Ok(text) = response.text().await {
-                    let response = tiny_http::Response::from_string(text);
+            match reqwest::get(&url).await {
+                Ok(response) => match response.text().await {
+                    Ok(text) => {
+                        let response = tiny_http::Response::from_string(text);
+                        request.respond(response).unwrap();
+                    }
+                    Err(err) => {
+                        let response = tiny_http::Response::from_string(format!(
+                            "proxy_error: failed to read master response ({})",
+                            err
+                        ));
+                        request.respond(response).unwrap();
+                    }
+                },
+                Err(err) => {
+                    let response = tiny_http::Response::from_string(format!(
+                        "proxy_error: master unreachable ({})",
+                        err
+                    ));
                     request.respond(response).unwrap();
                 }
             }

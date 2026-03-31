@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use shared::{VERSION, VERSION_STR};
+use shared::{info, warn, VERSION, VERSION_STR};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,12 @@ pub struct ServerList(HashMap<SocketAddr, ServerInfo>);
 
 #[tokio::main]
 async fn main() {
+    shared::init_logging();
+    info!(
+        "Starting KissMP master server (version path: {}, udp discovery: 3691, http api: 3692)",
+        VERSION_STR
+    );
+
     p2p_server().await;
 
     let server_list_r = Arc::new(Mutex::new(ServerList(HashMap::new())));
@@ -40,6 +46,7 @@ async fn main() {
                 if let Some(addr) = addr {
                     addr
                 } else {
+                    warn!("Received server announce without remote address");
                     return "err";
                 }
             };
@@ -47,6 +54,10 @@ async fn main() {
             let censor_sex = censor::Censor::Sex;
             let mut server_info: ServerInfo = server_info;
             if server_info.version != VERSION {
+                warn!(
+                    "Rejected server announce from {} due to version mismatch: {:?}",
+                    addr, server_info.version
+                );
                 return "Invalid server version";
             }
             if server_info.description.len() > 256 || server_info.name.len() > 64 {
@@ -73,6 +84,10 @@ async fn main() {
                 }
                 let addr = SocketAddr::new(addr.ip(), server_info.port);
                 server_info.update_time = Some(std::time::Instant::now());
+                info!(
+                    "Server announce OK: {} on {} (players: {}/{})",
+                    server_info.name, addr, server_info.player_count, server_info.max_players
+                );
                 server_list.0.insert(addr, server_info);
             }
             return "ok";
@@ -81,6 +96,7 @@ async fn main() {
     let addresses = addresses_r.clone();
     let ver = warp::path::param().map(move |ver: String| {
         if ver != VERSION_STR && ver != "latest" {
+            warn!("Server list requested with unsupported version path: {}", ver);
             return outdated_ver();
         }
         let server_list = server_list.clone();
@@ -105,11 +121,13 @@ async fn main() {
     });
     let outdated = warp::get().map(move || return outdated_ver());
     let routes = post.or(ver).or(outdated);
+    info!("Master HTTP endpoint is listening on 0.0.0.0:3692");
     warp::serve(routes).run(([0, 0, 0, 0], 3692)).await;
 }
 
 async fn p2p_server() {
     tokio::spawn(async {
+        info!("Master UDP discovery endpoint is listening on 0.0.0.0:3691");
         let mut socket = tokio::net::UdpSocket::bind((
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
             3691,
