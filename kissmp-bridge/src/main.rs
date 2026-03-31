@@ -567,51 +567,32 @@ async fn server_incoming(
 
     loop {
         tokio::select! {
-            command = reliable_commands.next() => match command {
-                Some(Ok(bytes)) => {
-                    let command = bincode::deserialize::<shared::ServerCommand>(&bytes)?;
-                    match command {
-                        shared::ServerCommand::VoiceChatPacket(client, pos, data) => {
-                            let _ = vc_playback_sender.send(voice_chat::VoiceChatPlaybackEvent::Packet(
-                                client, pos, data,
-                            ));
-                        }
-                        shared::ServerCommand::VoiceChatFrequencyUpdate(client, frequency) => {
-                            let _ = vc_playback_sender.send(
-                                voice_chat::VoiceChatPlaybackEvent::SetPlayerFrequency(
-                                    client,
-                                    frequency,
-                                ),
-                            );
-                        }
-                        shared::ServerCommand::PlayerDisconnected(client) => {
-                            let _ = vc_playback_sender.send(
-                                voice_chat::VoiceChatPlaybackEvent::SetPlayerFrequency(client, 0),
-                            );
-                            server_commands_sender
-                                .send(server_command_to_client_bytes(
-                                    shared::ServerCommand::PlayerDisconnected(client),
-                                ))
+            stream = reliable_streams.next() => match stream {
+                Some(Ok(mut stream)) => {
+                    loop {
+                        match read_pascal_bytes(&mut stream).await {
+                            Ok(bytes) => {
+                                let command = bincode::deserialize::<shared::ServerCommand>(&bytes)?;
+                                handle_server_command_in_bridge(
+                                    &server_commands_sender,
+                                    &mut downloads,
+                                    &mods_dir,
+                                    &vc_playback_sender,
+                                    command,
+                                )
                                 .await?;
+                            }
+                            Err(e) => {
+                                if !is_stream_terminated(&e) {
+                                    warn!("Error reading reliable command stream: {}", e);
+                                }
+                                break;
+                            }
                         }
-                        shared::ServerCommand::FilePart(name, data, _, file_size, _) => {
-                            handle_file_part_in_bridge(
-                                &server_commands_sender,
-                                &mut downloads,
-                                &mods_dir,
-                                name,
-                                data,
-                                file_size,
-                            )
-                            .await?;
-                        }
-                        _ => server_commands_sender
-                            .send(server_command_to_client_bytes(command))
-                            .await?,
                     }
                 }
                 Some(Err(e)) => {
-                    warn!("Error reading reliable command: {}", e);
+                    warn!("Error accepting reliable stream: {}", e);
                     break;
                 }
                 None => break,
@@ -619,45 +600,14 @@ async fn server_incoming(
             command = unreliable_commands.next() => match command {
                 Some(Ok(bytes)) => {
                     if let Ok(command) = bincode::deserialize::<shared::ServerCommand>(&bytes) {
-                        match command {
-                            shared::ServerCommand::VoiceChatPacket(client, pos, data) => {
-                                let _ = vc_playback_sender.send(voice_chat::VoiceChatPlaybackEvent::Packet(
-                                    client, pos, data,
-                                ));
-                            }
-                            shared::ServerCommand::VoiceChatFrequencyUpdate(client, frequency) => {
-                                let _ = vc_playback_sender.send(
-                                    voice_chat::VoiceChatPlaybackEvent::SetPlayerFrequency(
-                                        client,
-                                        frequency,
-                                    ),
-                                );
-                            }
-                            shared::ServerCommand::PlayerDisconnected(client) => {
-                                let _ = vc_playback_sender.send(
-                                    voice_chat::VoiceChatPlaybackEvent::SetPlayerFrequency(client, 0),
-                                );
-                                server_commands_sender
-                                    .send(server_command_to_client_bytes(
-                                        shared::ServerCommand::PlayerDisconnected(client),
-                                    ))
-                                    .await?;
-                            }
-                            shared::ServerCommand::FilePart(name, data, _, file_size, _) => {
-                                handle_file_part_in_bridge(
-                                    &server_commands_sender,
-                                    &mut downloads,
-                                    &mods_dir,
-                                    name,
-                                    data,
-                                    file_size,
-                                )
-                                .await?;
-                            }
-                            _ => server_commands_sender
-                                .send(server_command_to_client_bytes(command))
-                                .await?,
-                        }
+                        handle_server_command_in_bridge(
+                            &server_commands_sender,
+                            &mut downloads,
+                            &mods_dir,
+                            &vc_playback_sender,
+                            command,
+                        )
+                        .await?;
                     }
                 }
                 Some(Err(e)) => {
