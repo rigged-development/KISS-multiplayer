@@ -34,6 +34,7 @@ local function save_config()
     voice_echo_suppression = kissui.voice_echo_suppression[0],
     voice_noise_gate_strength = kissui.voice_noise_gate_strength[0],
     voice_echo_ducking_strength = kissui.voice_echo_ducking_strength[0],
+    accept_mod_downloads_all_servers = kissui.accept_mod_downloads_all_servers == true,
     -- Legacy keys kept for compatibility with older versions.
     voice_noise_suppression_level = kissui.voice_noise_gate_strength[0],
     voice_echo_suppression_level = kissui.voice_echo_ducking_strength[0],
@@ -118,6 +119,9 @@ local function load_config()
   end
   if config.voice_input_device ~= nil then
     kissui.voice_input_device = tostring(config.voice_input_device)
+  end
+  if config.accept_mod_downloads_all_servers ~= nil then
+    kissui.accept_mod_downloads_all_servers = not not config.accept_mod_downloads_all_servers
   end
   if config.voice_curve_profile ~= nil then
     local profile = tostring(config.voice_curve_profile)

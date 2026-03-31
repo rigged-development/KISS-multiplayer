@@ -6,6 +6,7 @@ local bor = bit.bor
 local main_window = require("kissmp.ui.main")
 M.chat = require("kissmp.ui.chat")
 M.download_window = require("kissmp.ui.download")
+M.mod_risk_window = require("kissmp.ui.mod_risk")
 local names = require("kissmp.ui.names")
 
 M.tabs = {
@@ -77,6 +78,8 @@ M.bridge_launched = false
 
 M.show_download = false
 M.downloads_info = {}
+M.show_mod_download_risk = false
+M.accept_mod_downloads_all_servers = false
 
 -- Color constants
 M.COLOR_YELLOW = {r = 1, g = 1, b = 0}
@@ -164,12 +167,18 @@ local function draw_incorrect_install()
 end
 
 local function onUpdate(dt)
+  if M.show_mod_download_risk then
+    M.mod_risk_window.draw()
+  end
   if getMissionFilename() ~= '' and not vehiclemanager.is_network_session then
     return
   end
   main_window.draw(dt)
   M.chat.draw()
   M.download_window.draw()
+  if not M.show_mod_download_risk then
+    M.mod_risk_window.draw()
+  end
   if M.incorrect_install then
      draw_incorrect_install()
   end

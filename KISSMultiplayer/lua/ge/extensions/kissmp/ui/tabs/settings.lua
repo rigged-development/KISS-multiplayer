@@ -1,6 +1,7 @@
 local M = {}
 local imgui = ui_imgui
 local player_volume_ptrs = {}
+local auto_accept_mod_downloads_ptr = imgui.BoolPtr(false)
 
 local function draw_voice_settings()
   imgui.Separator()
@@ -136,6 +137,11 @@ local function draw_voice_settings()
 end
 
 local function draw()
+  auto_accept_mod_downloads_ptr[0] = kissui.accept_mod_downloads_all_servers == true
+  if imgui.Checkbox("Auto-accept mod downloads for all servers", auto_accept_mod_downloads_ptr) then
+    kissui.accept_mod_downloads_all_servers = auto_accept_mod_downloads_ptr[0]
+    kissconfig.save_config()
+  end
   if imgui.Checkbox("Show Name Tags", kissui.show_nametags) then
     kissconfig.save_config()
   end

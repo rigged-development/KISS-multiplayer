@@ -7,6 +7,8 @@ M.downloads = {}
 M.downloads_meta = {}
 M.downloading = false
 M.downloads_status = {}
+M.pending_mod_download = nil
+M.skip_next_mod_consent = false
 
 local current_download = nil
 local on_finished_download
@@ -79,7 +81,16 @@ local function disconnect(data)
   end
   kissui.chat.add_message(text)
   M.connection.connected = false
-  M.connection.tcp:close()
+  if M.connection.tcp then
+    M.connection.tcp:close()
+    M.connection.tcp = nil
+  end
+  M.downloading = false
+  M.downloads_status = {}
+  if not M.pending_mod_download then
+    kissui.show_mod_download_risk = false
+  end
+  kissui.show_download = false
   M.players = {}
   kissplayers.players = {}
   kissplayers.player_transforms = {}
@@ -409,6 +420,7 @@ end
 
 local function connect(addr, player_name, is_public)
   M.is_server_public = is_public or false
+  local requested_addr = sanitize_addr(addr)
 
   if M.connection.connected then
     disconnect()
@@ -416,24 +428,16 @@ local function connect(addr, player_name, is_public)
   M.players = {}
 
   print("Connecting...")
-  addr = sanitize_addr(addr)
+  addr = requested_addr
   kissui.chat.add_message("Connecting to "..addr.."...")
   M.connection.tcp = socket.tcp()
-  M.connection.tcp:settimeout(3.0)
+  M.connection.tcp:settimeout(5.0)
   local connected, err = M.connection.tcp:connect("127.0.0.1", "7894")
 
   -- Send server address to the bridge
   local addr_lenght = ffi.string(ffi.new("uint32_t[?]", 1, {#addr}), 4)
   M.connection.tcp:send(addr_lenght)
   M.connection.tcp:send(addr)
-
-  -- Provide bridge with the real mods directory from the current Lua environment.
-  local mods_dir = get_bridge_mods_dir()
-  local mods_dir_length = ffi.string(ffi.new("uint32_t[?]", 1, {#mods_dir}), 4)
-  M.connection.tcp:send(mods_dir_length)
-  if #mods_dir > 0 then
-    M.connection.tcp:send(mods_dir)
-  end
 
   local connection_confirmed = M.connection.tcp:receive(1)
   if connection_confirmed then
@@ -517,26 +521,49 @@ local function connect(addr, player_name, is_public)
   end
   M.connection.mods_left = #missing_mods
 
+  local function request_missing_mods(mods)
+    M.downloading = true
+    kissui.show_download = true
+    send_data(
+      {
+        RequestMods = mods
+      },
+      true
+    )
+  end
+
+  local function open_mod_download_risk_popup()
+    if not M.pending_mod_download then
+      M.pending_mod_download = {}
+    end
+    M.pending_mod_download.missing_mods = missing_mods
+    kissui.show_mod_download_risk = true
+    if kissui.mod_risk_window and kissui.mod_risk_window.set_context then
+      kissui.mod_risk_window.set_context(server_info.name, missing_mods)
+    end
+  end
+
   kissmods.deactivate_all_mods()
   for k, v in pairs(missing_mods) do
     print(k.." "..v)
   end
   if #missing_mods > 0 then
-    -- Do not allow public servers to force mod downloads
-    if M.is_server_public then
-      kissui.chat.add_message("Cannot auto-download mods from public servers")
-      disconnect()
-      return
+    if kissui.accept_mod_downloads_all_servers or M.skip_next_mod_consent then
+      M.skip_next_mod_consent = false
+      M.pending_mod_download = nil
+      kissui.show_mod_download_risk = false
+      request_missing_mods(missing_mods)
     else
-        M.downloading = true
-        kissui.show_download = true
-      -- Request mods when using direct IP
-      send_data(
-        {
-          RequestMods = missing_mods
-        },
-        true
-      )
+      kissui.chat.add_message("Server requires mod downloads. Please confirm in the warning popup.", kissui.COLOR_YELLOW)
+      M.pending_mod_download = {
+        addr = requested_addr,
+        player_name = player_name,
+        is_public = M.is_server_public,
+        missing_mods = missing_mods,
+      }
+      open_mod_download_risk_popup()
+      kissrichpresence.update()
+      return
     end
   end
   vehiclemanager.loading_map = true
@@ -546,6 +573,48 @@ local function connect(addr, player_name, is_public)
   end
   kissrichpresence.update()
   kissui.chat.add_message("Connected!")
+end
+
+local function accept_mod_download(remember_for_all_servers)
+  local pending = M.pending_mod_download
+  if not pending then
+    return
+  end
+
+  M.pending_mod_download = nil
+  kissui.show_mod_download_risk = false
+
+  if remember_for_all_servers then
+    kissui.accept_mod_downloads_all_servers = true
+    if kissconfig and kissconfig.save_config then
+      kissconfig.save_config()
+    end
+  end
+
+  if not M.connection.connected and pending.addr and pending.player_name then
+    M.skip_next_mod_consent = true
+    connect(pending.addr, pending.player_name, pending.is_public)
+    return
+  end
+
+  M.downloading = true
+  kissui.show_download = true
+  send_data(
+    {
+      RequestMods = pending.missing_mods
+    },
+    true
+  )
+end
+
+local function decline_mod_download()
+  kissui.show_mod_download_risk = false
+  if M.pending_mod_download then
+    M.pending_mod_download = nil
+  end
+  if M.connection.connected then
+    disconnect("Mod download declined by player")
+  end
 end
 
 local function send_messagepack(data_type, reliable, data)
@@ -711,6 +780,8 @@ M.onLoadingScreenFadeout = onLoadingScreenFadeout
 M.get_client_id = get_client_id
 M.connect = connect
 M.disconnect = disconnect
+M.accept_mod_download = accept_mod_download
+M.decline_mod_download = decline_mod_download
 M.cancel_download = cancel_download
 M.send_data = send_data
 M.onUpdate = onUpdate

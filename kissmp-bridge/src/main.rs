@@ -22,6 +22,7 @@ extern crate log;
 const SERVER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const CONNECTED_BYTE: &[u8] = &[1];
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+const OPTIONAL_MODS_DIR_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(100);
 
 struct ModDownloadState {
     file: tokio::fs::File,
@@ -202,7 +203,7 @@ async fn main() {
 
             // Optional second handshake field: absolute mods dir from Lua environment.
             let mods_dir_hint = match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
+                OPTIONAL_MODS_DIR_HANDSHAKE_TIMEOUT,
                 read_pascal_bytes(&mut client_stream),
             )
             .await
@@ -635,10 +636,16 @@ async fn client_incoming(
     while let Ok(_) = client_stream_reader.read_exact(&mut buffer).await {
         let reliable = buffer[0] == 1;
         let mut len_buf = [0; 4];
-        let _ = client_stream_reader.read_exact(&mut len_buf).await;
+        if let Err(e) = client_stream_reader.read_exact(&mut len_buf).await {
+            debug!("Client stream closed while reading frame length: {}", e);
+            break;
+        }
         let len = i32::from_le_bytes(len_buf) as usize;
         let mut data = vec![0; len];
-        let _ = client_stream_reader.read_exact(&mut data).await;
+        if let Err(e) = client_stream_reader.read_exact(&mut data).await {
+            debug!("Client stream closed while reading frame payload: {}", e);
+            break;
+        }
         let decoded = serde_json::from_slice::<shared::ClientCommand>(&data);
         if let Ok(decoded) = decoded {
             match decoded {
