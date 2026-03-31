@@ -91,6 +91,14 @@ pub enum ClientCommand {
     // Only used by bridge
     SetVoiceChatInputDevice(String),
     // Only used by bridge
+    SetVoiceChatNoiseSuppression(bool),
+    // Only used by bridge
+    SetVoiceChatEchoSuppression(bool),
+    // Only used by bridge
+    SetVoiceChatNoiseSuppressionLevel(f32),
+    // Only used by bridge
+    SetVoiceChatEchoSuppressionLevel(f32),
+    // Only used by bridge
     SetVoiceChatCurveProfile(String),
     // Only used by bridge
     SetVoiceChatFrequency(u16),

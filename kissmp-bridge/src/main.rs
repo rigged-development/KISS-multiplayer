@@ -671,6 +671,26 @@ async fn client_incoming(
                         voice_chat::VoiceChatRecordingEvent::SetInputDevice(device_name),
                     );
                 }
+                shared::ClientCommand::SetVoiceChatNoiseSuppression(enabled) => {
+                    let _ = vc_recording_sender.send(
+                        voice_chat::VoiceChatRecordingEvent::SetNoiseSuppression(enabled),
+                    );
+                }
+                shared::ClientCommand::SetVoiceChatEchoSuppression(enabled) => {
+                    let _ = vc_recording_sender.send(
+                        voice_chat::VoiceChatRecordingEvent::SetEchoSuppression(enabled),
+                    );
+                }
+                shared::ClientCommand::SetVoiceChatNoiseSuppressionLevel(level) => {
+                    let _ = vc_recording_sender.send(
+                        voice_chat::VoiceChatRecordingEvent::SetNoiseSuppressionLevel(level),
+                    );
+                }
+                shared::ClientCommand::SetVoiceChatEchoSuppressionLevel(level) => {
+                    let _ = vc_recording_sender.send(
+                        voice_chat::VoiceChatRecordingEvent::SetEchoSuppressionLevel(level),
+                    );
+                }
                 shared::ClientCommand::SetVoiceChatCurveProfile(profile) => {
                     let _ = vc_playback_sender.send(
                         voice_chat::VoiceChatPlaybackEvent::SetCurveProfile(profile),
