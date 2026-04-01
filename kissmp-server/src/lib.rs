@@ -341,26 +341,36 @@ impl Server {
 
         info!("Connection stats: {:?}", new_connection.connection.stats());
 
-        // timeout for receiving client info
-        let client_info = tokio::time::timeout(
+        // timeout for receiving initial client-info frame
+        let client_info_bytes = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             async {
                 let mut stream = new_connection.uni_streams.try_next().await?;
                 if let Some(stream) = &mut stream {
-                    info!("Receiving client info stream...");
                     let mut buf = [0; 4];
                     stream.read_exact(&mut buf[0..4]).await?;
                     let len = u32::from_le_bytes(buf).min(16384) as usize;
-                    info!("Expected client info length: {}", len);
                     let mut buf: Vec<u8> = vec![0; len];
                     stream.read_exact(&mut buf).await?;
-                    info!("Received client info bytes: {} bytes", buf.len());
                     Ok(buf)
                 } else {
                     Err(anyhow::Error::msg("No client info stream received"))
                 }
             }
-        ).await;
+        )
+        .await
+        .map_err(|_| anyhow::Error::msg("Timed out while waiting for client info"))??;
+
+        let client_info_command = Self::decode_client_command_with_fallback(&client_info_bytes)
+            .context("Failed to decode client info")?;
+        let client_info = match client_info_command {
+            shared::ClientCommand::ClientInfo(info) => info,
+            _ => {
+                return Err(anyhow::Error::msg(
+                    "First client command is not ClientInfo",
+                ))
+            }
+        };
 
         let connection = new_connection.connection.clone();
         if self.connections.len() >= self.max_players.into() {
@@ -374,49 +384,10 @@ impl Server {
 
         let (ordered_tx, ordered_rx) = mpsc::channel(128);
         let (unreliable_tx, unreliable_rx) = mpsc::channel(128);
-        async fn receive_client_data(
-            new_connection: &mut quinn::NewConnection,
-        ) -> anyhow::Result<ClientInfoPrivate> {
-            let mut stream = new_connection.uni_streams.try_next().await?;
-            if let Some(stream) = &mut stream {
-                info!("Attempting to receive client info...");
-                let mut buf = [0; 4];
-                stream.read_exact(&mut buf[0..4]).await?;
-                let len = u32::from_le_bytes(buf).min(16384) as usize;
-                info!("Client info length: {}", len);
-                let mut buf: Vec<u8> = vec![0; len];
-                stream.read_exact(&mut buf).await?;
-                info!("Received raw client info data");
-                let info: shared::ClientCommand =
-                    bincode::deserialize::<shared::ClientCommand>(&buf)?;
-                info!("Deserialized client info");
-                info!("[DEBUG] Received client command: {:?}", info);
-                if let shared::ClientCommand::ClientInfo(info) = info {
-                    info!("Got client info: {:?}", info);
-                    Ok(info)
-                } else {
-                    Err(anyhow::Error::msg("Failed to fetch client info - wrong command type"))
-                }
-            } else {
-                Err(anyhow::Error::msg("Failed to fetch client info - no stream"))
-            }
-        }
-
         let connection_clone = connection.clone();
         // Receiver
         tokio::spawn(async move {
             info!("[CONNECT_TASK] Starting connection task for {}", id);
-            let client_info = {
-                if let Ok(client_data) = receive_client_data(&mut new_connection).await {
-                    client_data
-                } else {
-                    connection_clone.close(
-                        0u32.into(),
-                        b"Failed to fetch client info. Client version mismatch?",
-                    );
-                    return;
-                }
-            };
             if client_info.client_version != shared::VERSION {
                 connection_clone.close(
                     0u32.into(),
@@ -513,15 +484,18 @@ impl Server {
                             _ => {
                                 let mut stream = connection.open_uni().await;
                                 if let Ok(stream) = &mut stream {
-                                    let _ = send(stream, &Self::handle_outgoing_data(command)).await;
+                                    if let Some(data) = Self::handle_outgoing_data(command) {
+                                        let _ = send(stream, &data).await;
+                                    }
                                 }
                             }
                         }
                     });
                 }
                 command = unreliable.select_next_some() => {
-                    let data = Self::handle_outgoing_data(command);
-                    connection.send_datagram(data.into())?;
+                    if let Some(data) = Self::handle_outgoing_data(command) {
+                        connection.send_datagram(data.into())?;
+                    }
                 }
                 complete => {
                     break;

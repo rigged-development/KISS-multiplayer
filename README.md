@@ -33,6 +33,19 @@ for the mod to work.
 and hit the connect button.
 - Enjoy playing!
 
+## Compatibility Matrix
+Bridge and server now auto-detect a wire protocol per connection and log it at runtime (`Current` or `Legacy`).
+
+| Bridge build | Server wire format | Result |
+| --- | --- | --- |
+| Current (this repo) | Current (this repo) | Full compatibility |
+| Current (this repo) | Legacy (`TheHellBox/KISS-multiplayer` `master`) | Compatible via fallback |
+
+Notes:
+- `Legacy` mode is used only for the wire format. Internally, commands are converted to current shared types.
+- Newer voice-chat control commands that do not exist in legacy protocol are skipped when talking to legacy peers.
+- Check bridge logs for lines like `Wire protocol detected for <addr> ...: Legacy` to verify which mode was selected.
+
 ## Server installation
 Just launch the kissmp-server for your platform and you're ready to go.
 More detailed guide on server configuration can be found on this [wiki page](https://kissmp.online/docs/srv_hosting/hosting.html).

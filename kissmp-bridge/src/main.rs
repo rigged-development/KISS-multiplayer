@@ -181,6 +181,39 @@ pub struct DiscordState {
     pub server_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum WireProtocol {
+    Current,
+    Legacy,
+}
+
+fn decode_server_command_with_fallback(
+    bytes: &[u8],
+) -> Result<(shared::ServerCommand, WireProtocol), anyhow::Error> {
+    if let Ok(command) = bincode::deserialize::<shared::ServerCommand>(bytes) {
+        return Ok((command, WireProtocol::Current));
+    }
+
+    let legacy_command = bincode::deserialize::<shared::legacy::ServerCommand>(bytes)?;
+    Ok((
+        shared::legacy::server_command_from_legacy(legacy_command),
+        WireProtocol::Legacy,
+    ))
+}
+
+fn encode_client_command_for_wire(
+    command: shared::ClientCommand,
+    wire_protocol: WireProtocol,
+) -> Option<Vec<u8>> {
+    match wire_protocol {
+        WireProtocol::Current => bincode::serialize(&command).ok(),
+        WireProtocol::Legacy => {
+            let legacy = shared::legacy::client_command_to_legacy(command)?;
+            bincode::serialize(&legacy).ok()
+        }
+    }
+}
+
 async fn read_pascal_bytes<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Vec<u8>, anyhow::Error> {
     let mut buffer = [0; 4];
     stream.read_exact(&mut buffer).await?;
@@ -369,13 +402,28 @@ async fn connect_to_server(
         return;
     }
 
-    let server_info = match bincode::deserialize::<shared::ServerCommand>(&data) {
-        Ok(shared::ServerCommand::ServerInfo(info)) => info,
+    let (server_info_command, wire_protocol) = match decode_server_command_with_fallback(&data) {
+        Ok(v) => v,
         _ => {
             error!("Invalid server info received");
             return;
         }
     };
+
+    let server_info = match server_info_command {
+        shared::ServerCommand::ServerInfo(info) => info,
+        _ => {
+            error!("First server packet was not ServerInfo");
+            return;
+        }
+    };
+
+    info!(
+        "Wire protocol detected for {} (server: {}): {:?}",
+        addr,
+        server_info.name,
+        wire_protocol
+    );
 
     info!("Connected to server: {}", server_info.name);
 
@@ -464,12 +512,17 @@ async fn connect_to_server(
                 client_event_sender,
                 server_commands_sender.clone()
             ),
-            server_outgoing(server_connection.connection.clone(), client_event_receiver),
+            server_outgoing(
+                server_connection.connection.clone(),
+                client_event_receiver,
+                wire_protocol
+            ),
             server_incoming(
                 server_commands_sender,
                 vc_playback_sender,
                 server_connection,
                 mods_dir,
+                wire_protocol,
             ),
         );
 
@@ -586,6 +639,7 @@ async fn server_incoming(
     vc_playback_sender: std::sync::mpsc::Sender<voice_chat::VoiceChatPlaybackEvent>,
     server_connection: quinn::NewConnection,
     mods_dir: PathBuf,
+    wire_protocol: WireProtocol,
 ) -> AHResult {
     let mut downloads: HashMap<String, ModDownloadState> = HashMap::new();
     let mut reliable_streams = server_connection.uni_streams.fuse();
@@ -640,7 +694,13 @@ async fn server_incoming(
                 }
             },
             Some(bytes) = reliable_bytes_rx.recv() => {
-                let command = bincode::deserialize::<shared::ServerCommand>(&bytes)?;
+                let command = match wire_protocol {
+                    WireProtocol::Current => bincode::deserialize::<shared::ServerCommand>(&bytes)?,
+                    WireProtocol::Legacy => {
+                        let legacy = bincode::deserialize::<shared::legacy::ServerCommand>(&bytes)?;
+                        shared::legacy::server_command_from_legacy(legacy)
+                    }
+                };
                 handle_server_command_in_bridge(
                     &server_commands_sender,
                     &mut downloads,
@@ -652,7 +712,13 @@ async fn server_incoming(
             },
             command = unreliable_commands.next(), if !unreliable_commands_closed => match command {
                 Some(Ok(bytes)) => {
-                    if let Ok(command) = bincode::deserialize::<shared::ServerCommand>(&bytes) {
+                    let command = match wire_protocol {
+                        WireProtocol::Current => bincode::deserialize::<shared::ServerCommand>(&bytes).ok(),
+                        WireProtocol::Legacy => bincode::deserialize::<shared::legacy::ServerCommand>(&bytes)
+                            .ok()
+                            .map(shared::legacy::server_command_from_legacy),
+                    };
+                    if let Some(command) = command {
                         handle_server_command_in_bridge(
                             &server_commands_sender,
                             &mut downloads,
@@ -795,9 +861,13 @@ async fn client_incoming(
 async fn server_outgoing(
     server_stream: quinn::Connection,
     mut client_event_receiver: tokio::sync::mpsc::UnboundedReceiver<(bool, shared::ClientCommand)>,
+    wire_protocol: WireProtocol,
 ) -> AHResult {
     while let Some((reliable, client_command)) = client_event_receiver.recv().await {
-        let mut data = bincode::serialize::<shared::ClientCommand>(&client_command)?;
+        let mut data = match encode_client_command_for_wire(client_command, wire_protocol) {
+            Some(bytes) => bytes,
+            None => continue,
+        };
         if !reliable {
             server_stream.send_datagram(data.into())?;
         } else {
