@@ -1,6 +1,6 @@
 local M = {}
 
-M.VERSION_STR = "0.7.0"
+M.VERSION_STR = "0.7.1"
 M.is_server_public = false
 
 M.downloads = {}
@@ -9,6 +9,7 @@ M.downloading = false
 M.downloads_status = {}
 M.pending_mod_download = nil
 M.skip_next_mod_consent = false
+M.downloads_received = {}
 
 local current_download = nil
 local on_finished_download
@@ -65,6 +66,7 @@ time_offset_smoother.get = function(new_sample)
 end
 
 local function bytesToU32(str)
+  if not str or #str < 4 then return 0 end
   local b1, b2, b3, b4 = str:byte(1, 4)
   return bit.bor(
       bit.lshift(b4, 24),
@@ -105,7 +107,9 @@ local function disconnect(data)
   --kissui.force_disable_nametags = false
   --Lua:requestReload()
   --kissutils.hooks.clear()
-  returnToMainMenu()
+  if getMissionFilename() ~= "" then
+    returnToMainMenu()
+  end
 end
 
 local function handle_disconnected(data)
@@ -685,6 +689,10 @@ local function cancel_download()
   for k, v in pairs(M.downloads) do
      M.downloads[k]:close()
   end
+
+  -- Clear the tables so dead file handles aren't reused
+  M.downloads_received = {}
+  M.downloading = false
   M.downloads = {}
   M.downloads_meta = {}
   M.downloads_status = {}
@@ -723,6 +731,7 @@ local function onUpdate(dt)
     -- JSON data
     if string.byte(msg_type) == 1 then
       local data = tcp:receive(4)
+      if not data then break end
       local len = bytesToU32(data)
       local data, _, _ = tcp:receive(len)
       if M.connection.tcp then
@@ -738,6 +747,9 @@ local function onUpdate(dt)
         end
       end
     elseif string.byte(msg_type) == 0 then -- Binary data
+      local name_b = M.connection.tcp:receive(4)
+      if not name_b then break end
+
       M.downloading = true
       kissui.show_download = true
       local name_b = tcp:receive(4)

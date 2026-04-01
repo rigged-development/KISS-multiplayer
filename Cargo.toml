@@ -10,7 +10,7 @@ default-members = [
     "kissmp-server"
 ]
 [workspace.package]
-version = "0.6.0"
+version = "0.7.1"
 authors = ["hellbox"]
 edition = "2018"
 
