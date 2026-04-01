@@ -19,8 +19,49 @@ local filter_queued = false
 local filtered_servers = {}
 local filtered_favorite_servers = {}
 local next_bridge_status_update = 0
+local add_master_alias = imgui.ArrayChar(64)
+local add_master_url = imgui.ArrayChar(256)
+local add_master_p2p_host = imgui.ArrayChar(128)
+local add_master_error = nil
+local edit_master_alias = imgui.ArrayChar(64)
+local edit_master_url = imgui.ArrayChar(256)
+local edit_master_p2p_host = imgui.ArrayChar(128)
+local edit_master_error = nil
+local edit_master_loaded_id = nil
+local refresh_job_id = nil
+local refresh_job_elapsed = 0
+local refresh_poll_elapsed = 0
+local refresh_poll_interval = 0.15
+local refresh_job_timeout_seconds = 20
+local refresh_poll_failures = 0
+local refresh_last_state = nil
+local refresh_last_logged_error = nil
+M.refresh_in_progress = false
+M.last_refresh_stats = nil
+
+local refresh_server_list
+
+local function http_request_with_timeout(url, timeout_seconds)
+  local previous_timeout = http.TIMEOUT
+  http.TIMEOUT = timeout_seconds
+  local body, code, headers, status_line = http.request(url)
+  http.TIMEOUT = previous_timeout
+  return body, code, headers, status_line
+end
+
+local function url_encode(text)
+  return (tostring(text):gsub("[^%w%-_%.~]", function(c)
+    return string.format("%%%02X", string.byte(c))
+  end))
+end
+
+local function log_refresh(message)
+  print("[KissMP][ServerList] " .. tostring(message))
+end
 
 M.server_list = {}
+M.last_master_error = nil
+M.last_master_status = nil
 
 -- Server list update and search
 -- spairs from https://stackoverflow.com/a/15706820
@@ -87,16 +128,442 @@ local function update_filtered_servers(m)
   --filtered_favorite_servers = filter_server_list(kissui.tabs.favorites.favorite_servers, term, filter_notfull, filter_online, m)
 end
 
-local function refresh_server_list(m)
-  local kissui = kissui or m
-  local b, _, _  = http.request("http://127.0.0.1:3693/check")
-  if b and b == "ok" then
+local function get_master_version_path()
+  local version = "latest"
+  if network and type(network.VERSION_STR) == "string" and network.VERSION_STR ~= "" then
+    version = network.VERSION_STR
+  end
+
+  version = tostring(version):gsub("^/+", ""):gsub("/+$", "")
+  if version == "" then
+    version = "latest"
+  end
+  return version
+end
+
+local function collect_target_masters(kissui)
+  if kissui.ensure_master_server_config then
+    kissui.ensure_master_server_config()
+  end
+
+  local masters = {}
+  local seen = {}
+  for _, entry in ipairs(kissui.master_servers or {}) do
+    local enabled = true
+    if entry.enabled_for_query ~= nil then
+      enabled = not not entry.enabled_for_query
+    end
+    local url = tostring(entry.master_url or "")
+      :gsub("^%s*(.-)%s*$", "%1")
+      :gsub("/+$", "")
+    if enabled and url ~= "" and not seen[url] then
+      seen[url] = true
+      table.insert(masters, url)
+    end
+  end
+
+  if #masters == 0 then
+    local selected_master = nil
+    if kissui.get_selected_master_server then
+      selected_master = kissui.get_selected_master_server()
+    end
+    local url = tostring((selected_master and selected_master.master_url) or kissui.master_addr or "")
+      :gsub("^%s*(.-)%s*$", "%1")
+      :gsub("/+$", "")
+    if url ~= "" then
+      table.insert(masters, url)
+    end
+  end
+
+  return masters
+end
+
+local function build_batch_start_url(kissui)
+  local payload = {
+    masters = collect_target_masters(kissui),
+    version = get_master_version_path(),
+  }
+  return "http://127.0.0.1:3693/master_batch/start/" .. url_encode(jsonEncode(payload))
+end
+
+local function poll_refresh_job(dt, m)
+  if not M.refresh_in_progress or not refresh_job_id then
+    return
+  end
+
+  refresh_job_elapsed = refresh_job_elapsed + dt
+  refresh_poll_elapsed = refresh_poll_elapsed + dt
+
+  if refresh_job_elapsed > refresh_job_timeout_seconds then
+    M.refresh_in_progress = false
+    refresh_job_id = nil
+    M.last_master_error = "Master request timed out"
+    local kissui = kissui or m
+    kissui.bridge_launched = false
+    return
+  end
+
+  if refresh_poll_elapsed < refresh_poll_interval then
+    return
+  end
+  refresh_poll_elapsed = 0
+
+  local status_url = "http://127.0.0.1:3693/master_batch/status/" .. tostring(refresh_job_id)
+  local body, code, _, _ = http_request_with_timeout(status_url, 1.0)
+  if not body then
+    refresh_poll_failures = refresh_poll_failures + 1
+    M.last_master_error = "Master status polling failed: " .. tostring(code)
+    if M.last_master_error ~= refresh_last_logged_error then
+      log_refresh("poll failed for request_id=" .. tostring(refresh_job_id) .. " code=" .. tostring(code))
+      refresh_last_logged_error = M.last_master_error
+    end
+    if refresh_poll_failures >= 8 then
+      M.refresh_in_progress = false
+      local kissui = kissui or m
+      kissui.bridge_launched = false
+      refresh_job_id = nil
+      M.last_master_error = "Master status polling failed too often"
+      log_refresh("aborting refresh after repeated polling failures")
+    end
+    return
+  end
+  refresh_poll_failures = 0
+
+  local decoded = jsonDecode(body)
+  if not decoded then
+    M.last_master_error = "Master status returned invalid JSON"
+    if M.last_master_error ~= refresh_last_logged_error then
+      log_refresh("poll returned invalid JSON for request_id=" .. tostring(refresh_job_id) .. " body=" .. tostring(body))
+      refresh_last_logged_error = M.last_master_error
+    end
+    return
+  end
+
+  if decoded.state ~= refresh_last_state then
+    log_refresh("request_id=" .. tostring(refresh_job_id) .. " state=" .. tostring(decoded.state))
+    refresh_last_state = decoded.state
+  end
+
+  if decoded.state == "pending" then
+    return
+  end
+
+  if decoded.state == "missing" then
+    M.refresh_in_progress = false
+    refresh_job_id = nil
+    M.last_master_error = "Master request job expired"
+    return
+  end
+
+  if decoded.state == "done" then
+    M.refresh_in_progress = false
+    refresh_job_id = nil
+    local kissui = kissui or m
     kissui.bridge_launched = true
+
+    M.last_refresh_stats = {
+      masters_ok = tonumber(decoded.masters_ok) or 0,
+      masters_total = tonumber(decoded.masters_total) or 0,
+    }
+
+    local server_list = decoded.server_list
+    if type(server_list) == "table" then
+      M.server_list = server_list
+      update_filtered_servers(kissui)
+      local server_count = 0
+      for _ in pairs(server_list) do server_count = server_count + 1 end
+      log_refresh(
+        "request_id done; servers="
+          .. tostring(server_count)
+          .. ", masters_ok="
+          .. tostring(M.last_refresh_stats.masters_ok)
+          .. "/"
+          .. tostring(M.last_refresh_stats.masters_total)
+      )
+    else
+      M.last_master_error = "Master batch result missing server_list"
+      if M.last_master_error ~= refresh_last_logged_error then
+        log_refresh("done result missing server_list for request_id=" .. tostring(refresh_job_id))
+        refresh_last_logged_error = M.last_master_error
+      end
+      return
+    end
+
+    if type(decoded.errors) == "table" and #decoded.errors > 0 then
+      M.last_master_error = table.concat(decoded.errors, " | ")
+      log_refresh("request_id done with partial errors: " .. tostring(M.last_master_error))
+    else
+      M.last_master_error = nil
+      refresh_last_logged_error = nil
+    end
+    return
   end
-  local b, _, _  = http.request("http://127.0.0.1:3693/"..kissui.master_addr.."/"..VERSION_PRTL)
-  if b then
-    M.server_list = jsonDecode(b) or {}
+
+  M.last_master_error = "Unexpected master job state: " .. tostring(decoded.state)
+  if M.last_master_error ~= refresh_last_logged_error then
+    log_refresh(M.last_master_error)
+    refresh_last_logged_error = M.last_master_error
   end
+end
+
+local function current_master_alias(kissui)
+  if kissui.get_selected_master_server then
+    local selected = kissui.get_selected_master_server()
+    if selected then
+      return tostring(selected.alias or selected.master_url or "Unknown")
+    end
+  end
+  return "Unknown"
+end
+
+local function find_master_by_id(master_servers, id)
+  for _, entry in ipairs(master_servers or {}) do
+    if entry.id == id then
+      return entry
+    end
+  end
+  return nil
+end
+
+local function is_protected_master_id(id)
+  return id == "kissmp_official" or id == "beamapex"
+end
+
+local function select_fallback_master(kissui)
+  local official = find_master_by_id(kissui.master_servers, "kissmp_official")
+  if official then
+    return official.id
+  end
+  if kissui.master_servers and #kissui.master_servers > 0 then
+    return kissui.master_servers[1].id
+  end
+  return nil
+end
+
+local function load_edit_buffers_from_selected(selected)
+  edit_master_alias = imgui.ArrayChar(64, tostring(selected.alias or ""))
+  edit_master_url = imgui.ArrayChar(256, tostring(selected.master_url or ""))
+  edit_master_p2p_host = imgui.ArrayChar(128, tostring(selected.master_p2p_host or ""))
+  edit_master_loaded_id = selected.id
+  edit_master_error = nil
+end
+
+local function make_unique_master_id(alias, master_servers)
+  local base = tostring(alias or "")
+    :lower()
+    :gsub("[^%w]+", "_")
+    :gsub("^_+", "")
+    :gsub("_+$", "")
+
+  if base == "" then
+    base = "custom_master"
+  end
+
+  local candidate = base
+  local counter = 1
+  while find_master_by_id(master_servers, candidate) do
+    candidate = base .. "_" .. tostring(counter)
+    counter = counter + 1
+  end
+  return candidate
+end
+
+local function draw_master_selector(m)
+  local kissui = kissui or m
+  if kissui.ensure_master_server_config then
+    kissui.ensure_master_server_config()
+  end
+
+  imgui.Text("Master Server:")
+  if imgui.BeginCombo("##master_server_select", current_master_alias(kissui)) then
+    for i, entry in ipairs(kissui.master_servers or {}) do
+      local selected = (entry.id == kissui.selected_master_id)
+      local label = tostring(entry.alias) .. "###master_server_" .. tostring(i)
+      if imgui.Selectable1(label, selected) then
+        kissui.selected_master_id = entry.id
+        if kissui.ensure_master_server_config then
+          kissui.ensure_master_server_config()
+        end
+        kissconfig.save_config()
+        refresh_server_list(kissui)
+        update_filtered_servers(kissui)
+      end
+    end
+    imgui.EndCombo()
+  end
+
+  local selected = nil
+  if kissui.get_selected_master_server then
+    selected = kissui.get_selected_master_server()
+  end
+
+  if selected then
+    imgui.Text("URL: " .. tostring(selected.master_url or ""))
+  end
+
+  imgui.Text("List Sources")
+  for i, entry in ipairs(kissui.master_servers or {}) do
+    local enabled = true
+    if entry.enabled_for_query ~= nil then
+      enabled = not not entry.enabled_for_query
+    end
+    local enabled_ptr = imgui.BoolPtr(enabled)
+    local label = tostring(entry.alias or entry.id or "Master") .. "###master_source_enabled_" .. tostring(i)
+    if imgui.Checkbox(label, enabled_ptr) then
+      entry.enabled_for_query = enabled_ptr[0]
+      kissconfig.save_config()
+      refresh_server_list(kissui)
+    end
+  end
+
+  if imgui.CollapsingHeader1("Master Server Management###master_server_management") then
+    if selected then
+      if edit_master_loaded_id ~= selected.id then
+        load_edit_buffers_from_selected(selected)
+      end
+
+      imgui.Text("Edit Selected Master")
+      if is_protected_master_id(selected.id) then
+        imgui.Text("This default entry is read-only and can not be deleted")
+      else
+        imgui.InputText("Alias##edit_master_alias", edit_master_alias)
+        imgui.InputText("Master URL##edit_master_url", edit_master_url)
+        imgui.InputText("Master P2P Host##edit_master_p2p", edit_master_p2p_host)
+
+        if imgui.Button("Save Changes##save_master_changes") then
+          local alias = tostring(ffi.string(edit_master_alias)):gsub("^%s*(.-)%s*$", "%1")
+          local master_url = tostring(ffi.string(edit_master_url)):gsub("^%s*(.-)%s*$", "%1")
+          local master_p2p_host = tostring(ffi.string(edit_master_p2p_host)):gsub("^%s*(.-)%s*$", "%1")
+
+          if alias == "" then
+            edit_master_error = "Alias darf nicht leer sein"
+          elseif master_url == "" then
+            edit_master_error = "Master URL darf nicht leer sein"
+          else
+            selected.alias = alias
+            selected.master_url = master_url
+            selected.master_p2p_host = master_p2p_host
+            if kissui.ensure_master_server_config then
+              kissui.ensure_master_server_config()
+            end
+            kissconfig.save_config()
+            edit_master_error = nil
+            refresh_server_list(kissui)
+            update_filtered_servers(kissui)
+          end
+        end
+
+        imgui.SameLine()
+        if imgui.Button("Delete##delete_master") then
+          for i = #kissui.master_servers, 1, -1 do
+            if kissui.master_servers[i].id == selected.id then
+              table.remove(kissui.master_servers, i)
+              break
+            end
+          end
+          kissui.selected_master_id = select_fallback_master(kissui)
+          if kissui.ensure_master_server_config then
+            kissui.ensure_master_server_config()
+          end
+          kissconfig.save_config()
+          edit_master_loaded_id = nil
+          edit_master_error = nil
+          refresh_server_list(kissui)
+          update_filtered_servers(kissui)
+        end
+
+        if edit_master_error then
+          imgui.Text("Fehler: " .. tostring(edit_master_error))
+        end
+      end
+    end
+
+    imgui.Separator()
+    imgui.Text("Add Master Server")
+    imgui.InputText("Alias##master_alias", add_master_alias)
+    imgui.InputText("Master URL##master_url", add_master_url)
+    imgui.InputText("Master P2P Host##master_p2p", add_master_p2p_host)
+
+    if imgui.Button("Add Master##add_master") then
+      local alias = tostring(ffi.string(add_master_alias)):gsub("^%s*(.-)%s*$", "%1")
+      local master_url = tostring(ffi.string(add_master_url)):gsub("^%s*(.-)%s*$", "%1")
+      local master_p2p_host = tostring(ffi.string(add_master_p2p_host)):gsub("^%s*(.-)%s*$", "%1")
+
+      if alias == "" then
+        add_master_error = "Alias darf nicht leer sein"
+      elseif master_url == "" then
+        add_master_error = "Master URL darf nicht leer sein"
+      else
+        local id = make_unique_master_id(alias, kissui.master_servers)
+        table.insert(kissui.master_servers, {
+          id = id,
+          alias = alias,
+          master_url = master_url,
+          master_p2p_host = master_p2p_host,
+          enabled_for_query = true,
+        })
+        kissui.selected_master_id = id
+        if kissui.ensure_master_server_config then
+          kissui.ensure_master_server_config()
+        end
+        kissconfig.save_config()
+        add_master_alias = imgui.ArrayChar(64)
+        add_master_url = imgui.ArrayChar(256)
+        add_master_p2p_host = imgui.ArrayChar(128)
+        add_master_error = nil
+        refresh_server_list(kissui)
+        update_filtered_servers(kissui)
+      end
+    end
+
+    if add_master_error then
+      imgui.Text("Fehler: " .. tostring(add_master_error))
+    end
+  end
+
+  imgui.Separator()
+end
+
+refresh_server_list = function(m)
+  local kissui = kissui or m
+  local target_masters = collect_target_masters(kissui)
+  if #target_masters == 0 then
+    M.last_master_error = "No master servers configured"
+    log_refresh("refresh requested without any target masters")
+    return
+  end
+
+  log_refresh("starting async refresh; masters=" .. table.concat(target_masters, ", "))
+
+  local start_url = build_batch_start_url(kissui)
+  local body, code, _, status_line = http_request_with_timeout(start_url, 1.2)
+  M.last_master_status = status_line
+
+  if not body then
+    kissui.bridge_launched = false
+    M.last_master_error = "Could not start async master request: " .. tostring(code)
+    log_refresh("failed to start async refresh: " .. tostring(code))
+    return
+  end
+
+  local decoded = jsonDecode(body)
+  if not decoded or type(decoded.request_id) ~= "string" then
+    kissui.bridge_launched = false
+    M.last_master_error = "Invalid async start response"
+    log_refresh("invalid start response body=" .. tostring(body))
+    return
+  end
+
+  refresh_job_id = decoded.request_id
+  refresh_job_elapsed = 0
+  refresh_poll_elapsed = 0
+  refresh_poll_failures = 0
+  refresh_last_state = nil
+  refresh_last_logged_error = nil
+  M.refresh_in_progress = true
+  M.last_master_error = nil
+  M.last_refresh_stats = nil
+  log_refresh("started request_id=" .. tostring(refresh_job_id))
 end
 
 local function draw_list_search_and_filters(show_online_filter)
@@ -166,7 +633,9 @@ local function draw(dt)
   end
 
   time_since_filters_change = time_since_filters_change + dt
+  poll_refresh_job(dt)
 
+  draw_master_selector()
   draw_list_search_and_filters(false)
 
   local server_count = 0
@@ -202,8 +671,19 @@ local function draw(dt)
   end
 
   imgui.PushTextWrapPos(0)
-  if not kissui.bridge_launched then
+  if M.refresh_in_progress then
+    imgui.Text("Refreshing server list asynchronously...")
+  elseif not kissui.bridge_launched then
     imgui.Text("Bridge is not launched. Please, launch the bridge and then hit 'Refresh list' button")
+  elseif M.last_master_error then
+    imgui.Text("Could not refresh server list: " .. tostring(M.last_master_error))
+  elseif M.last_refresh_stats and M.last_refresh_stats.masters_total and M.last_refresh_stats.masters_total > 1 then
+    imgui.Text(
+      "Loaded masters: "
+        .. tostring(M.last_refresh_stats.masters_ok)
+        .. "/"
+        .. tostring(M.last_refresh_stats.masters_total)
+    )
   elseif server_count == 0 then
     imgui.Text("Server list is empty")
   end
@@ -213,7 +693,6 @@ local function draw(dt)
 
   if imgui.Button("Refresh List", imgui.ImVec2(-1, 0)) then
     refresh_server_list()
-    update_filtered_servers()
   end
 end
 

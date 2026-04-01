@@ -24,6 +24,26 @@ local function save_config()
     window_opacity = kissui.window_opacity[0],
     enable_view_distance = kissui.enable_view_distance[0],
     view_distance = kissui.view_distance[0],
+    voice_range = kissui.voice_range[0],
+    voice_input_volume = kissui.voice_input_volume[0],
+    voice_input_device = kissui.voice_input_device or "",
+    voice_curve_profile = kissui.voice_curve_profile or "Balanced",
+    voice_walkie_enabled = kissui.voice_walkie_enabled[0],
+    voice_frequency = kissui.voice_frequency[0],
+    voice_noise_suppression = kissui.voice_noise_suppression[0],
+    voice_echo_suppression = kissui.voice_echo_suppression[0],
+    voice_noise_gate_strength = kissui.voice_noise_gate_strength[0],
+    voice_echo_ducking_strength = kissui.voice_echo_ducking_strength[0],
+    accept_mod_downloads_all_servers = kissui.accept_mod_downloads_all_servers == true,
+    -- Legacy keys kept for compatibility with older versions.
+    voice_noise_suppression_level = kissui.voice_noise_gate_strength[0],
+    voice_echo_suppression_level = kissui.voice_echo_ducking_strength[0],
+    voice_player_volumes = kissui.voice_player_volumes or {},
+    master_addr = kissui.master_addr,
+    master_p2p_host = kissui.master_p2p_host,
+    master_servers = kissui.master_servers or {},
+    selected_master_id = kissui.selected_master_id,
+    aggregate_master_lists = kissui.aggregate_master_lists,
     base_secret_v2 = secret
   }
   local file = io.open("./settings/kissmp_config.json", "w")
@@ -42,6 +62,30 @@ local function load_config()
   local content = file:read("*a")
   local config = jsonDecode(content or "")
   if not config then return end
+
+  if type(config.master_servers) == "table" then
+    kissui.master_servers = config.master_servers
+  end
+  if config.selected_master_id ~= nil then
+    kissui.selected_master_id = tostring(config.selected_master_id)
+  end
+  if config.aggregate_master_lists ~= nil then
+    kissui.aggregate_master_lists = not not config.aggregate_master_lists
+  end
+  if config.master_addr ~= nil and (type(config.master_servers) ~= "table" or #config.master_servers == 0) then
+    kissui.master_servers = {
+      {
+        id = "legacy_master",
+        alias = "Legacy Master",
+        master_url = tostring(config.master_addr),
+        master_p2p_host = tostring(config.master_p2p_host or "")
+      }
+    }
+    kissui.selected_master_id = "legacy_master"
+  end
+  if kissui.ensure_master_server_config then
+    kissui.ensure_master_server_config()
+  end
 
   if config.name ~= nil then
     kissui.player_name = imgui.ArrayChar(32, config.name)
@@ -67,11 +111,74 @@ local function load_config()
   if config.base_secret_v2 ~= nil then
     network.base_secret = config.base_secret_v2
   end
+  if config.voice_range ~= nil then
+    kissui.voice_range[0] = tonumber(config.voice_range) or 120
+  end
+  if config.voice_input_volume ~= nil then
+    kissui.voice_input_volume[0] = tonumber(config.voice_input_volume) or 1.0
+  end
+  if config.voice_input_device ~= nil then
+    kissui.voice_input_device = tostring(config.voice_input_device)
+  end
+  if config.accept_mod_downloads_all_servers ~= nil then
+    kissui.accept_mod_downloads_all_servers = not not config.accept_mod_downloads_all_servers
+  end
+  if config.voice_curve_profile ~= nil then
+    local profile = tostring(config.voice_curve_profile)
+    if profile == "Realistic" or profile == "Balanced" or profile == "Arcade" then
+      kissui.voice_curve_profile = profile
+    else
+      kissui.voice_curve_profile = "Balanced"
+    end
+  end
+  if config.voice_walkie_enabled ~= nil then
+    kissui.voice_walkie_enabled[0] = config.voice_walkie_enabled
+  end
+  if config.voice_frequency ~= nil then
+    local freq = tonumber(config.voice_frequency) or 0
+    kissui.voice_frequency[0] = math.max(0, math.min(65535, math.floor(freq)))
+  end
+  if config.voice_noise_suppression ~= nil then
+    kissui.voice_noise_suppression[0] = config.voice_noise_suppression
+  end
+  if config.voice_echo_suppression ~= nil then
+    kissui.voice_echo_suppression[0] = config.voice_echo_suppression
+  end
+  local noise_gate_strength = config.voice_noise_gate_strength
+  if noise_gate_strength == nil then
+    noise_gate_strength = config.voice_noise_suppression_level
+  end
+  if noise_gate_strength ~= nil then
+    local level = tonumber(noise_gate_strength) or 0.5
+    kissui.voice_noise_gate_strength[0] = math.max(0, math.min(1, level))
+  end
+
+  local echo_ducking_strength = config.voice_echo_ducking_strength
+  if echo_ducking_strength == nil then
+    echo_ducking_strength = config.voice_echo_suppression_level
+  end
+  if echo_ducking_strength ~= nil then
+    local level = tonumber(echo_ducking_strength) or 0.8
+    kissui.voice_echo_ducking_strength[0] = math.max(0, math.min(1, level))
+  end
+  if type(config.voice_player_volumes) == "table" then
+    kissui.voice_player_volumes = {}
+    for key, value in pairs(config.voice_player_volumes) do
+      local id = tonumber(key)
+      local volume = tonumber(value)
+      if id and volume then
+        kissui.voice_player_volumes[id] = volume
+      end
+    end
+  end
   io.close(file)
 end
 
 local function init()
   load_config()
+  if kissui.ensure_master_server_config then
+    kissui.ensure_master_server_config()
+  end
   if #FS:findFiles("/mods/", "kissmultiplayer.zip", 1000) == 0 then
     kissui.incorrect_install = true
   end

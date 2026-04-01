@@ -1,6 +1,6 @@
 #[recursion_limit = "1024"]
 use ipnetwork::Ipv4Network;
-use quinn::IdleTimeout;
+use quinn::{IdleTimeout, VarInt};
 use shared::vehicle;
 
 pub mod config;
@@ -20,8 +20,10 @@ use anyhow::{Context, Error};
 use futures::FutureExt;
 use futures::{select, StreamExt, TryStreamExt};
 use log::{error, info, warn, debug};
+use crc32fast::Hasher as Crc32Hasher;
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +67,7 @@ impl Connection {
 
 pub struct Server {
     connections: HashMap<u32, Connection>,
+    voice_frequencies: HashMap<u32, u16>,
     vehicles: HashMap<u32, Vehicle>,
     // Client ID, game_id, server_id
     vehicle_ids: HashMap<u32, HashMap<u32, u32>>,
@@ -84,20 +87,59 @@ pub struct Server {
     lua_commands: std::sync::mpsc::Receiver<lua::LuaCommand>,
     server_identifier: String,
     upnp_enabled: bool,
+    master_url: String,
+    master_p2p_host: String,
     upnp_port: Option<u16>,
     public_address: Option<String>,
     mods: Option<Vec<String>>,
+    mod_transfer_chunk_size: usize,
     tick: u64,
 }
 
 impl Server {
+    async fn drive_connection_sender(
+        connection: quinn::Connection,
+        ordered_rx: mpsc::Receiver<ServerCommand>,
+        unreliable_rx: mpsc::Receiver<ServerCommand>,
+        server_info: Vec<u8>,
+        id: u32,
+        mod_transfer_chunk_size: usize,
+    ) {
+        let mut stream = match connection.open_uni().await {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!("Failed to open server info stream: {}", e);
+                return;
+            }
+        };
+        info!("[DEBUG] Sender task started for {}", id);
+        if let Err(e) = send(&mut stream, &server_info).await {
+            error!("Failed to send server info: {}", e);
+            return;
+        }
+        info!("[DEBUG] Server info sent to {}", id);
+
+        if let Err(e) = Self::drive_send(
+            connection,
+            ordered_rx,
+            unreliable_rx,
+            mod_transfer_chunk_size,
+        )
+        .await
+        {
+            error!("Connection drive_send error: {}", e);
+        }
+    }
+
     pub fn from_config(config: config::Config) -> Self {
         let (lua, receiver) = lua::setup_lua();
         let (watcher_tx, watcher_rx) = std::sync::mpsc::channel();
         let lua_watcher =
             notify::Watcher::new(watcher_tx, std::time::Duration::from_secs(2)).unwrap();
+        let mod_transfer_chunk_size = (config.mod_transfer_chunk_size_kib.clamp(512, 1024) as usize) * 1024;
         Self {
             connections: HashMap::with_capacity(8),
+            voice_frequencies: HashMap::with_capacity(8),
             reqwest_client: reqwest::Client::new(),
             vehicles: HashMap::with_capacity(64),
             vehicle_ids: HashMap::with_capacity(64),
@@ -117,8 +159,11 @@ impl Server {
             lua_commands: receiver,
             server_identifier: config.server_identifier,
             upnp_enabled: config.upnp_enabled,
+            master_url: config.master_url,
+            master_p2p_host: config.master_p2p_host,
             public_address: None,
             mods: config.mods,
+            mod_transfer_chunk_size,
             tick: 0,
         }
     }
@@ -136,7 +181,7 @@ impl Server {
                 self.upnp_port = Some(port);
                 info!("Fetching public IP address...");
                 let socket = UdpSocket::bind(&addr).unwrap();
-                socket.connect("kissmp.online:3691");
+                let _ = socket.connect(&self.master_p2p_host);
                 let mut i = 0;
                 while i < 5 {
                     let _ = socket.send(b"hi");
@@ -179,6 +224,10 @@ impl Server {
             IdleTimeout::try_from(std::time::Duration::from_secs(60)).unwrap(),
         ));
         transport.keep_alive_interval(Some(std::time::Duration::from_secs(2)));
+        transport.stream_receive_window(VarInt::from_u32(8 * 1024 * 1024));
+        transport.receive_window(VarInt::from_u32(32 * 1024 * 1024));
+        transport.send_window(32 * 1024 * 1024);
+        transport.max_concurrent_uni_streams(VarInt::from_u32(256));
         server_config.transport = std::sync::Arc::new(transport);
 
         let (_endpoint, incoming) = quinn::Endpoint::server(server_config, addr).unwrap();
@@ -271,9 +320,10 @@ impl Server {
         .to_string();
 
         let client = self.reqwest_client.clone();
+        let master_url = self.master_url.clone();
         tokio::spawn(async move {
             let _ = client
-                .post("http://kissmp.online:3692")
+                .post(master_url)
                 .body(server_info)
                 .send()
                 .await;
@@ -424,28 +474,15 @@ impl Server {
                 server_identifier: self.server_identifier.clone(),
             }))
             .unwrap();
-        // Sender
-        tokio::spawn(async move {
-            let mut stream = match connection.open_uni().await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    error!("Failed to open server info stream: {}", e);
-                    return;
-                }
-            };
-            info!("[DEBUG] Sender task started for {}", id);
-            if let Err(e) = send(&mut stream, &server_info).await {
-                error!("Failed to send server info: {}", e);
-                return;
-            }
-            info!("[DEBUG] Server info sent to {}", id);
-            // debug!("Sent server info to client");
-
-            // Start driving connection
-            if let Err(e) = Self::drive_send(connection, ordered_rx, unreliable_rx).await {
-                error!("Connection drive_send error: {}", e);
-            }
-        });
+        let mod_transfer_chunk_size = self.mod_transfer_chunk_size;
+        tokio::spawn(Self::drive_connection_sender(
+            connection,
+            ordered_rx,
+            unreliable_rx,
+            server_info,
+            id,
+            mod_transfer_chunk_size,
+        ));
         Ok(())
     }
 
@@ -453,6 +490,7 @@ impl Server {
         connection: quinn::Connection,
         ordered: mpsc::Receiver<ServerCommand>,
         unreliable: mpsc::Receiver<ServerCommand>,
+        mod_transfer_chunk_size: usize,
     ) -> anyhow::Result<()> {
         let mut ordered = ReceiverStream::new(ordered).fuse();
         let mut unreliable = ReceiverStream::new(unreliable).fuse();
@@ -465,7 +503,12 @@ impl Server {
                         match command {
                             ServerCommand::TransferFile(file) => {
                                 //println!("Transfer");
-                                let _ = file_transfer::transfer_file(connection.clone(), std::path::Path::new(&file)).await;
+                                let _ = file_transfer::transfer_file(
+                                    connection.clone(),
+                                    std::path::Path::new(&file),
+                                    mod_transfer_chunk_size,
+                                )
+                                .await;
                             }
                             _ => {
                                 let mut stream = connection.open_uni().await;
@@ -605,7 +648,7 @@ async fn send(stream: &mut quinn::SendStream, message: &[u8]) -> anyhow::Result<
 
 pub fn list_mods(
     mods: Option<Vec<String>>,
-) -> anyhow::Result<(Vec<(String, u32)>, Vec<std::path::PathBuf>)> {
+) -> anyhow::Result<(Vec<(String, u32, String)>, Vec<std::path::PathBuf>)> {
     let mut paths = vec![];
 
     if let Some(mods) = mods {
@@ -683,7 +726,19 @@ pub fn list_mods(
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         let file = std::fs::File::open(path.clone())?;
         let metadata = file.metadata()?;
-        result.push((file_name, metadata.len() as u32));
+        let mut file_for_hash = std::fs::File::open(path.clone())?;
+        let mut hasher = Crc32Hasher::new();
+        let mut hash_buf = [0u8; 64 * 1024];
+        loop {
+            let read_bytes = file_for_hash.read(&mut hash_buf)?;
+            if read_bytes == 0 {
+                break;
+            }
+            hasher.update(&hash_buf[..read_bytes]);
+        }
+        let hash = format!("crc32:{:08x}", hasher.finalize());
+
+        result.push((file_name, metadata.len() as u32, hash));
         raw.push(path);
     }
     Ok((result, raw))

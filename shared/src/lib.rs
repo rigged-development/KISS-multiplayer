@@ -35,7 +35,7 @@ pub struct ServerInfo {
     pub map: String,
     pub tickrate: u8,
     pub max_vehicles_per_client: u8,
-    pub mods: Vec<(String, u32)>,
+    pub mods: Vec<(String, u32, String)>,
     pub server_identifier: String,
 }
 
@@ -82,6 +82,28 @@ pub enum ClientCommand {
     StartTalking,
     // Only used by bridge
     EndTalking,
+    // Only used by bridge
+    SetVoiceChatDistance(f32),
+    // Only used by bridge
+    SetVoiceChatPlayerVolume(u32, f32),
+    // Only used by bridge
+    SetVoiceChatInputVolume(f32),
+    // Only used by bridge
+    SetVoiceChatInputDevice(String),
+    // Only used by bridge
+    SetVoiceChatNoiseSuppression(bool),
+    // Only used by bridge
+    SetVoiceChatEchoSuppression(bool),
+    // Only used by bridge
+    SetVoiceChatNoiseSuppressionLevel(f32),
+    // Only used by bridge
+    SetVoiceChatEchoSuppressionLevel(f32),
+    // Only used by bridge
+    SetVoiceChatCurveProfile(String),
+    // Only used by bridge
+    SetVoiceChatFrequency(u16),
+    // Only used by bridge
+    RequestVoiceChatInputDevices,
     DataChunk {
         chunk_index: u32,
         total_chunks: u32,
@@ -109,6 +131,7 @@ pub enum ServerCommand {
     ServerInfo(ServerInfo),
     FilePart(String, Vec<u8>, u32, u32, u32),
     VoiceChatPacket(u32, [f32; 3], Vec<u8>),
+    VoiceChatFrequencyUpdate(u32, u16),
     Pong(f64),
 
     // public server commands
