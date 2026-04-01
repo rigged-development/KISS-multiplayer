@@ -23,6 +23,7 @@ const SERVER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const CONNECTED_BYTE: &[u8] = &[1];
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(200);
 const OPTIONAL_MODS_DIR_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(100);
+const OPTIONAL_PLAYER_NAME_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(100);
 
 struct ModDownloadState {
     file: tokio::fs::File,
@@ -251,7 +252,7 @@ async fn main() {
     while let Ok((mut client_stream, _)) = listener.accept().await {
         info!("Attempting to connect to a server...");
 
-        let (addr, mods_dir_hint) = {
+        let (addr, mods_dir_hint, player_name_hint) = {
             let address_string =
                 String::from_utf8(read_pascal_bytes(&mut client_stream).await.unwrap()).unwrap();
 
@@ -275,6 +276,29 @@ async fn main() {
                 Err(_) => None,
             };
 
+            // Optional third handshake field: player name from in-game connect UI.
+            let player_name_hint = match tokio::time::timeout(
+                OPTIONAL_PLAYER_NAME_HANDSHAKE_TIMEOUT,
+                read_pascal_bytes(&mut client_stream),
+            )
+            .await
+            {
+                Ok(Ok(bytes)) if !bytes.is_empty() => {
+                    let name = String::from_utf8_lossy(&bytes).trim().to_string();
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some(name)
+                    }
+                }
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => {
+                    warn!("Failed to read Lua player name hint: {}", e);
+                    None
+                }
+                Err(_) => None,
+            };
+
             let mut socket_addrs = match address_string.to_socket_addrs() {
                 Ok(socket_addrs) => socket_addrs,
                 Err(e) => {
@@ -290,21 +314,35 @@ async fn main() {
                 }
             };
 
-            (addr, mods_dir_hint)
+            (addr, mods_dir_hint, player_name_hint)
         };
 
         info!("Connecting to {}...", addr);
-        connect_to_server(addr, mods_dir_hint, client_stream, discord_tx.clone()).await;
+        connect_to_server(
+            addr,
+            mods_dir_hint,
+            player_name_hint,
+            client_stream,
+            discord_tx.clone(),
+        )
+        .await;
     }
 }
 
 async fn connect_to_server(
     addr: SocketAddr,
     mods_dir_hint: Option<PathBuf>,
+    player_name_hint: Option<String>,
     client_stream: TcpStream,
     discord_tx: std::sync::mpsc::Sender<DiscordState>,
 ) -> () {
     let mods_dir = resolve_mods_dir(mods_dir_hint.as_deref());
+    let player_name = player_name_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Bridge Client")
+        .to_string();
     info!("Bridge mod download directory: {}", mods_dir.display());
     let endpoint = {
         // Generate certificate first
@@ -355,7 +393,7 @@ async fn connect_to_server(
 
     // Send initial client info to establish connection
     let client_info = shared::ClientCommand::ClientInfo(shared::ClientInfoPrivate {
-        name: "Bridge Client".to_string(),
+        name: player_name,
         client_version: shared::VERSION,
         secret: String::from("bridge"),
         steamid64: None,

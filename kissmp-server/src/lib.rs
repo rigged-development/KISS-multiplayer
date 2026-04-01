@@ -387,7 +387,7 @@ impl Server {
         let connection_clone = connection.clone();
         // Receiver
         tokio::spawn(async move {
-            info!("[CONNECT_TASK] Starting connection task for {}", id);
+            info!("[CONNECT_TASK] Starting connection task for {} with id {}", client_info.name, id);
             if client_info.client_version != shared::VERSION {
                 connection_clone.close(
                     0u32.into(),

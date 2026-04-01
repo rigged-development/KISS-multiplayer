@@ -463,6 +463,14 @@ local function connect(addr, player_name, is_public)
     M.connection.tcp:send(mods_dir)
   end
 
+  -- Optional hint for bridge: player name from connect UI.
+  local bridge_player_name = tostring(player_name or "")
+  local bridge_player_name_length = ffi.string(ffi.new("uint32_t[?]", 1, {#bridge_player_name}), 4)
+  M.connection.tcp:send(bridge_player_name_length)
+  if #bridge_player_name > 0 then
+    M.connection.tcp:send(bridge_player_name)
+  end
+
   local connection_confirmed = M.connection.tcp:receive(1)
   if connection_confirmed then
     if connection_confirmed ~= string.char(1) then
