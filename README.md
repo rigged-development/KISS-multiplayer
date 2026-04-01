@@ -3,6 +3,8 @@
 
 [KISS](https://en.wikipedia.org/wiki/KISS_principle) Multiplayer mod for BeamNG.drive ([Discord Channel](https://discord.gg/ANPsDkeVVF))
 
+This mod was modified by Rigged.gg to fix bugs and add more features. ([Discord](https://discord.gg/riggedgg))
+
 ## Main features
 - Cross platform, open source & free server written in Rust
 - QUIC-based networking (with help of quinn and tokio for async)
